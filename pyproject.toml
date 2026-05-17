@@ -1,0 +1,18 @@
+[project]
+name = "langgraph-tutorial"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "dotenv>=0.9.9",
+    "langchain>=1.2.18",
+    "langchain-mistralai>=1.1.4",
+    "langgraph>=1.1.10",
+    "langgraph-checkpoint-sqlite>=3.1.0",
+    "prompt-toolkit>=3.0.52",
+    "rich>=15.0.0",
+    "streamlit>=1.57.0",
+    "typing>=3.10.0.0",
+]
