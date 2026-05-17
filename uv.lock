@@ -176,6 +176,37 @@ wheels = [
 ]
 
 [[package]]
+name = "chatbot-cli"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aiosqlite" },
+    { name = "dotenv" },
+    { name = "langchain" },
+    { name = "langchain-mistralai" },
+    { name = "langgraph" },
+    { name = "langgraph-checkpoint-sqlite" },
+    { name = "prompt-toolkit" },
+    { name = "rich" },
+    { name = "streamlit" },
+    { name = "typing" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.22.1" },
+    { name = "dotenv", specifier = ">=0.9.9" },
+    { name = "langchain", specifier = ">=1.2.18" },
+    { name = "langchain-mistralai", specifier = ">=1.1.4" },
+    { name = "langgraph", specifier = ">=1.1.10" },
+    { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.0" },
+    { name = "prompt-toolkit", specifier = ">=3.0.52" },
+    { name = "rich", specifier = ">=15.0.0" },
+    { name = "streamlit", specifier = ">=1.57.0" },
+    { name = "typing", specifier = ">=3.10.0.0" },
+]
+
+[[package]]
 name = "click"
 version = "8.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -584,37 +615,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/02/f1/134046c20bc4a4a15d410d1d21c9e298a3e9923777b4cc867b8669bc636b/langgraph_sdk-0.3.14.tar.gz", hash = "sha256:acd1674c538e97f3cdaa610f6dd7e34bc9bad30167f0ccc482dcd563325e81f5", size = 198162, upload-time = "2026-05-05T18:40:03.524Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/34/96/1c9f9fbfe756ddd850a2585e7f1949d8ebb97fdaa7a5eff8f45ed1314670/langgraph_sdk-0.3.14-py3-none-any.whl", hash = "sha256:68935bf6f4924eda92617a9e5dfb4f4281197508c648cb9d62ff083907607f9d", size = 97028, upload-time = "2026-05-05T18:40:02.099Z" },
-]
-
-[[package]]
-name = "langgraph-tutorial"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "aiosqlite" },
-    { name = "dotenv" },
-    { name = "langchain" },
-    { name = "langchain-mistralai" },
-    { name = "langgraph" },
-    { name = "langgraph-checkpoint-sqlite" },
-    { name = "prompt-toolkit" },
-    { name = "rich" },
-    { name = "streamlit" },
-    { name = "typing" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiosqlite", specifier = ">=0.22.1" },
-    { name = "dotenv", specifier = ">=0.9.9" },
-    { name = "langchain", specifier = ">=1.2.18" },
-    { name = "langchain-mistralai", specifier = ">=1.1.4" },
-    { name = "langgraph", specifier = ">=1.1.10" },
-    { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.0" },
-    { name = "prompt-toolkit", specifier = ">=3.0.52" },
-    { name = "rich", specifier = ">=15.0.0" },
-    { name = "streamlit", specifier = ">=1.57.0" },
-    { name = "typing", specifier = ">=3.10.0.0" },
 ]
 
 [[package]]
