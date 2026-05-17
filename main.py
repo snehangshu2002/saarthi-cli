@@ -1,5 +1,7 @@
 import uuid
 import asyncio
+import json
+import os
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
@@ -9,19 +11,61 @@ from prompt_toolkit.history import InMemoryHistory
 from langchain_mistralai import MistralAIEmbeddings
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.sqlite.aio import AsyncSqliteStore
-
+import random
 from chatbot import uncompiled_builder
 
 console = Console()
 embedding_model = MistralAIEmbeddings()
 
+SETTINGS_FILE = "settings.json"
+
+
+STATUS_MESSAGES = [
+    "Thinking...",
+    "Planning...",
+    "Searching memory...",
+    "Reasoning...",
+    "Analyzing context...",
+    "Writing response...",
+    "Connecting ideas...",
+    "Checking memories...",
+    "Processing...",
+    "Building answer..."
+]
 COMMANDS = {
     "/exit": "Quit the chatbot",
     "/clear": "Start a new conversation (new thread)",
     "/memory": "Show what the bot remembers about you",
     "/help": "Show available commands",
+    "/settings": "Show current settings",
 }
 
+# ──────────────────────────────────────────
+# Settings helpers
+# ──────────────────────────────────────────
+
+def load_settings() -> dict:
+    defaults = {"username": ""}
+    if not os.path.exists(SETTINGS_FILE):
+        save_settings(defaults)  
+        return defaults
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {**defaults, **data}
+    except (json.JSONDecodeError, OSError):
+        save_settings(defaults)  
+        return defaults
+
+
+def save_settings(settings: dict) -> None:
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+
+
+# ──────────────────────────────────────────
+# Chat helpers
+# ──────────────────────────────────────────
 
 def show_help():
     console.print("\n[bold yellow]Available commands:[/]")
@@ -46,10 +90,7 @@ async def show_memory(store, user_id):
 
 
 async def seed_username(store, user_id: str):
-    """
-    On login, write the username into the store if not already present.
-    This ensures identity facts are available from the very first message.
-    """
+    """Write the username into long-term memory once on login."""
     namespace = ("user", user_id, "details")
     try:
         existing = await store.alist(namespace)
@@ -66,11 +107,9 @@ async def seed_username(store, user_id: str):
 
 
 async def stream_response(graph, user_input: str, config: dict) -> str:
-    """Stream the assistant reply token-by-token and return the full text."""
+    """Stream the assistant reply token-by-token."""
     full_text = ""
-
     console.print("\n[bold green]Bot:[/]")
-
     with Live("", console=console, refresh_per_second=15) as live:
         async for event in graph.astream_events(
             {"messages": [{"role": "user", "content": user_input}]},
@@ -85,14 +124,30 @@ async def stream_response(graph, user_input: str, config: dict) -> str:
                 if isinstance(token, str):
                     full_text += token
                     live.update(full_text)
-
     console.print()
     return full_text
 
 
+# ──────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────
+
 async def run():
     session = PromptSession(history=InMemoryHistory())
     console.print(Rule("[bold cyan]Chatbot[/]"))
+
+    # Load settings and resolve username
+    settings = load_settings()
+    user_id = settings.get("username", "").strip()
+
+    if not user_id:
+        # First run or cleared — ask once, then persist
+        user_id = (await session.prompt_async("Enter username: ")).strip() or "default"
+        settings["username"] = user_id
+        save_settings(settings)
+        console.print(f"[dim]Username saved to {SETTINGS_FILE}. You won't be asked again.[/]")
+    else:
+        console.print(f"[dim]Welcome back, [bold]{user_id}[/]![/]")
 
     async with AsyncSqliteSaver.from_conn_string("data/checkpoints.db") as checkpointer:
         async with AsyncSqliteStore.from_conn_string(
@@ -103,16 +158,12 @@ async def run():
 
             graph = uncompiled_builder.compile(checkpointer=checkpointer, store=store)
 
-            user_id = (await session.prompt_async("Enter username: ")).strip() or "default"
-
-            # FIX: seed the username into long-term memory immediately on login
-            # so the bot knows who it's talking to from the very first message.
             await seed_username(store, user_id)
 
             thread_id = str(uuid.uuid4())
             config = {"configurable": {"user_id": user_id, "thread_id": thread_id}}
 
-            console.print(f"\n[dim]Session started for [bold]{user_id}[/]. Type /help for commands.[/]\n")
+            console.print(f"\n[dim]Session started. Type /help for commands.[/]\n")
 
             while True:
                 try:
@@ -132,6 +183,13 @@ async def run():
                     show_help()
                     continue
 
+                elif user_input == "/settings":
+                    console.print(f"\n[bold yellow]Current settings:[/]")
+                    for k, v in load_settings().items():
+                        console.print(f"  [cyan]{k}[/]: {v}")
+                    console.print()
+                    continue
+
                 elif user_input == "/clear":
                     thread_id = str(uuid.uuid4())
                     config["configurable"]["thread_id"] = thread_id
@@ -146,8 +204,11 @@ async def run():
                     console.print(f"[red]Unknown command:[/] {user_input}. Type /help.\n")
                     continue
 
-                console.print("[dim]Processing...[/]")
-                await stream_response(graph, user_input, config)
+                with console.status(
+                    f"[dim]{random.choice(STATUS_MESSAGES)}[/]",
+                    spinner="dots"
+                ):
+                    await stream_response(graph, user_input, config)
 
 
 if __name__ == "__main__":
