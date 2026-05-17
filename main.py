@@ -3,16 +3,25 @@ import asyncio
 import json
 import os
 import random
+import subprocess
+from datetime import datetime
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.rule import Rule
-from rich.live import Live
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
+from prompt_toolkit.clipboard import Clipboard, ClipboardData
+from prompt_toolkit.document import Document
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout.containers import Float, FloatContainer
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.shortcuts import radiolist_dialog, input_dialog, message_dialog
+from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import TextArea
 from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.sqlite.aio import AsyncSqliteStore
@@ -33,10 +42,53 @@ STATUS_MESSAGES = [
 COMMANDS = {
     "/exit":     "Quit the chatbot",
     "/new":      "Start a new conversation",
+    "/resume":   "Resume an older conversation",
     # "/memory":   "Show what the bot remembers about you",
     "/help":     "Show available commands",
     "/settings": "Show current settings",
 }
+
+APP_STYLE = Style.from_dict(
+    {
+        "transcript": "",
+        "status": "",
+        "input": "",
+        "completion-menu": "",
+        "completion-menu.completion.current": "reverse",
+        "completion-menu.meta.completion": "",
+        "completion-menu.meta.completion.current": "reverse",
+    }
+)
+
+
+class WindowsClipboard(Clipboard):
+    def get_data(self) -> ClipboardData:
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ClipboardData("")
+
+        if result.returncode != 0:
+            return ClipboardData("")
+        return ClipboardData(result.stdout.rstrip("\r\n"))
+
+    def set_data(self, data: ClipboardData) -> None:
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Set-Clipboard"],
+                input=data.text,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
 
 
 class SlashCommandCompleter(Completer):
@@ -77,6 +129,414 @@ def create_chat_session() -> PromptSession:
         complete_while_typing=True,
         key_bindings=build_key_bindings(),
     )
+
+
+def _message_content_text(message) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(message, dict):
+        content = message.get("content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return " ".join(
+            part.get("text", "").strip()
+            for part in content
+            if isinstance(part, dict) and part.get("text")
+        ).strip()
+    return str(content).strip()
+
+
+def _message_role(message) -> str:
+    if isinstance(message, dict):
+        return str(message.get("role", ""))
+    msg_type = getattr(message, "type", "")
+    if msg_type:
+        return str(msg_type)
+    return type(message).__name__.replace("Message", "").lower()
+
+
+def _clip_text(text: str, limit: int = 90) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
+
+
+def _format_checkpoint_time(ts: str) -> str:
+    try:
+        return datetime.fromisoformat(ts).astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return ts
+
+
+def _checkpoint_preview(checkpoint_tuple) -> str:
+    channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
+    summary = channel_values.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return _clip_text(summary)
+
+    messages = channel_values.get("messages", [])
+    for message in reversed(messages):
+        text = _message_content_text(message)
+        if text.startswith("Task exception was never retrieved"):
+            continue
+        if text:
+            return _clip_text(text)
+
+    return "No saved preview"
+
+
+def _render_messages(messages: list) -> str:
+    blocks = []
+    for message in messages:
+        role = _message_role(message)
+        content = _message_content_text(message)
+        if not content:
+            continue
+        if role in {"human", "user"}:
+            blocks.append(f"You: {content}")
+        elif role in {"ai", "assistant"}:
+            blocks.append(f"Bot:\n{content}")
+    return "\n\n".join(blocks)
+
+
+async def list_user_sessions(checkpointer, user_id: str, limit: int = 20) -> list[dict]:
+    sessions = []
+    seen_threads = set()
+
+    async for item in checkpointer.alist(None, filter={"user_id": user_id}, limit=200):
+        thread_id = item.config["configurable"]["thread_id"]
+        if thread_id in seen_threads:
+            continue
+        seen_threads.add(thread_id)
+        sessions.append(
+            {
+                "thread_id": thread_id,
+                "ts": item.checkpoint.get("ts", ""),
+                "label": f"{_format_checkpoint_time(item.checkpoint.get('ts', ''))}  {_checkpoint_preview(item)}",
+            }
+        )
+
+    return sessions[:limit]
+
+
+async def load_thread_snapshot(checkpointer, thread_id: str):
+    config = {"configurable": {"thread_id": thread_id}}
+    return await checkpointer.aget_tuple(config)
+
+
+class ChatUI:
+    def __init__(self):
+        self._history = InMemoryHistory()
+        self._transcript_text = ""
+        self._pending_input = None
+        self._stream_anchor = None
+        self._status = ""
+        self._selection_options = []
+        self._selection_index = 0
+        self._selection_title = ""
+        self._selection_instruction = ""
+
+        self.transcript = TextArea(
+            text="",
+            read_only=True,
+            focusable=True,
+            focus_on_click=True,
+            scrollbar=True,
+            wrap_lines=True,
+            style="class:transcript",
+        )
+        self.input = TextArea(
+            prompt="> ",
+            multiline=False,
+            wrap_lines=False,
+            history=self._history,
+            completer=SlashCommandCompleter(),
+            complete_while_typing=True,
+            style="class:input",
+        )
+
+        body = HSplit(
+            [
+                self.transcript,
+                Window(
+                    height=1,
+                    content=FormattedTextControl(self._get_status_bar_text),
+                ),
+                self.input,
+            ]
+        )
+
+        layout = FloatContainer(
+            content=body,
+            floats=[
+                Float(
+                    xcursor=True,
+                    ycursor=True,
+                    content=CompletionsMenu(max_height=8),
+                )
+            ],
+        )
+
+        self.app = Application(
+            layout=Layout(layout, focused_element=self.input),
+            full_screen=True,
+            mouse_support=False,
+            style=APP_STYLE,
+            key_bindings=self._build_key_bindings(),
+            clipboard=WindowsClipboard(),
+        )
+
+    def _build_key_bindings(self) -> KeyBindings:
+        bindings = KeyBindings()
+
+        @bindings.add("enter")
+        def _(event):
+            buffer = self.input.buffer
+            if buffer.complete_state and buffer.complete_state.current_completion:
+                buffer.apply_completion(buffer.complete_state.current_completion)
+                return
+
+            if self.has_selection():
+                if self._pending_input is not None and not self._pending_input.done():
+                    self._pending_input.set_result("__select__")
+                buffer.set_document(Document("", 0), bypass_readonly=True)
+                return
+
+            text = buffer.text.strip()
+            if not text or self._pending_input is None or self._pending_input.done():
+                return
+
+            self._pending_input.set_result(text)
+            buffer.set_document(Document("", 0), bypass_readonly=True)
+
+        @bindings.add("tab")
+        def _(event):
+            if self.app.layout.has_focus(self.input):
+                self.app.layout.focus(self.transcript)
+                self.set_status("Transcript focus. Ctrl+A copies all, Ctrl+Space starts selection, Tab returns.")
+            else:
+                self.app.layout.focus(self.input)
+                self.set_status("")
+
+        @bindings.add("/")
+        def _(event):
+            if not self.app.layout.has_focus(self.input):
+                self.app.layout.focus(self.input)
+            buffer = self.input.buffer
+            buffer.insert_text("/")
+            if buffer.text == "/":
+                buffer.start_completion(select_first=True)
+
+        @bindings.add("up")
+        def _(event):
+            if self.has_selection():
+                self._selection_index = (self._selection_index - 1) % len(self._selection_options)
+                self._render_transcript()
+                return
+            event.app.current_buffer.auto_up()
+
+        @bindings.add("down")
+        def _(event):
+            if self.has_selection():
+                self._selection_index = (self._selection_index + 1) % len(self._selection_options)
+                self._render_transcript()
+                return
+            event.app.current_buffer.auto_down()
+
+        @bindings.add("pageup")
+        def _(event):
+            self.app.layout.focus(self.transcript)
+            self.transcript.buffer.cursor_up(count=15)
+            self.set_status("Scrolling transcript. Tab returns to input.")
+
+        @bindings.add("pagedown")
+        def _(event):
+            self.app.layout.focus(self.transcript)
+            self.transcript.buffer.cursor_down(count=15)
+            self.set_status("Scrolling transcript. Tab returns to input.")
+
+        @bindings.add("escape", "up")
+        def _(event):
+            self.app.layout.focus(self.transcript)
+            self.transcript.buffer.cursor_up(count=3)
+            self.set_status("Scrolling transcript. Tab returns to input.")
+
+        @bindings.add("escape", "down")
+        def _(event):
+            self.app.layout.focus(self.transcript)
+            self.transcript.buffer.cursor_down(count=3)
+            self.set_status("Scrolling transcript. Tab returns to input.")
+
+        @bindings.add("home")
+        def _(event):
+            self.app.layout.focus(self.transcript)
+            self.transcript.buffer.cursor_position = 0
+            self.set_status("Top of transcript. Tab returns to input.")
+
+        @bindings.add("end")
+        def _(event):
+            self.app.layout.focus(self.transcript)
+            self.transcript.buffer.cursor_position = len(self.transcript.buffer.text)
+            self.set_status("Bottom of transcript. Tab returns to input.")
+
+        @bindings.add("escape")
+        def _(event):
+            if self.has_selection():
+                self.cancel_selection()
+                if self._pending_input is not None and not self._pending_input.done():
+                    self._pending_input.set_result("__cancel_select__")
+
+        @bindings.add("c-v")
+        def _(event):
+            if not self.app.layout.has_focus(self.input):
+                self.app.layout.focus(self.input)
+            data = event.app.clipboard.get_data()
+            if data.text:
+                self.input.buffer.insert_text(data.text)
+
+        @bindings.add("c-c")
+        def _(event):
+            buffer = event.app.current_buffer
+            if buffer.selection_state:
+                event.app.clipboard.set_data(buffer.copy_selection())
+                if self.app.layout.has_focus(self.transcript):
+                    self.set_status("Transcript selection copied.")
+                return
+            if self.has_selection():
+                self.cancel_selection()
+                if self._pending_input is not None and not self._pending_input.done():
+                    self._pending_input.set_result("__cancel_select__")
+                return
+            if self._pending_input is not None and not self._pending_input.done():
+                self._pending_input.set_exception(EOFError())
+
+        @bindings.add("c-space")
+        def _(event):
+            if self.app.layout.has_focus(self.transcript):
+                buffer = self.transcript.buffer
+                if buffer.selection_state:
+                    buffer.exit_selection()
+                    self.set_status("Transcript selection cleared.")
+                else:
+                    buffer.start_selection()
+                    self.set_status("Transcript selection started. Move with arrows, Ctrl+C copies.")
+
+        @bindings.add("c-a")
+        def _(event):
+            if self.app.layout.has_focus(self.transcript):
+                buffer = self.transcript.buffer
+                event.app.clipboard.set_data(ClipboardData(buffer.text))
+                self.set_status("Transcript copied to clipboard.")
+                return
+            event.app.current_buffer.cursor_position = 0
+
+        @bindings.add("c-q")
+        @bindings.add("c-d")
+        def _(event):
+            if self._pending_input is not None and not self._pending_input.done():
+                self._pending_input.set_exception(EOFError())
+
+        return bindings
+
+    def _get_status_bar_text(self):
+        return [("class:status", f" {self._status}" if self._status else "")]
+
+    def _selection_block(self) -> str:
+        if not self._selection_options:
+            return ""
+
+        lines = [self._selection_title]
+        for index, option in enumerate(self._selection_options):
+            prefix = ">" if index == self._selection_index else " "
+            lines.append(f"{prefix} {index + 1}. {option['label']}  [{option['thread_id'][:8]}]")
+        if self._selection_instruction:
+            lines.append(self._selection_instruction)
+        return "\n".join(lines)
+
+    def _render_transcript(self):
+        previous_position = self.transcript.buffer.cursor_position
+        was_at_bottom = previous_position >= len(self.transcript.buffer.text)
+        text = self._transcript_text
+        selection_block = self._selection_block()
+        if selection_block:
+            if text:
+                text += "\n\n"
+            text += selection_block
+        if self.app.layout.has_focus(self.transcript) and not was_at_bottom:
+            cursor_position = min(previous_position, len(text))
+        else:
+            cursor_position = len(text)
+        self.transcript.buffer.set_document(
+            Document(text, cursor_position=cursor_position),
+            bypass_readonly=True,
+        )
+        self.app.invalidate()
+
+    def append_block(self, text: str):
+        if self._transcript_text:
+            self._transcript_text += "\n"
+        self._transcript_text += text.rstrip() + "\n"
+        self._render_transcript()
+
+    def clear_transcript(self):
+        self._transcript_text = ""
+        self._stream_anchor = None
+        self._render_transcript()
+
+    def has_selection(self) -> bool:
+        return bool(self._selection_options)
+
+    def start_selection(self, title: str, options: list[dict], instruction: str):
+        self._selection_title = title
+        self._selection_options = options
+        self._selection_index = 0
+        self._selection_instruction = instruction
+        self.input.buffer.set_document(Document("", 0), bypass_readonly=True)
+        self._render_transcript()
+
+    def cancel_selection(self):
+        self._selection_title = ""
+        self._selection_options = []
+        self._selection_index = 0
+        self._selection_instruction = ""
+        self._render_transcript()
+
+    def current_selection(self):
+        if not self._selection_options:
+            return None
+        return self._selection_options[self._selection_index]
+
+    def set_status(self, text: str):
+        self._status = text
+        self.app.invalidate()
+
+    def start_bot_message(self):
+        if self._transcript_text and not self._transcript_text.endswith("\n"):
+            self._transcript_text += "\n"
+        self._stream_anchor = len(self._transcript_text)
+        self._transcript_text += "Bot:\n"
+        self._render_transcript()
+
+    def update_bot_message(self, text: str):
+        if self._stream_anchor is None:
+            self.start_bot_message()
+        self._transcript_text = self._transcript_text[: self._stream_anchor] + f"Bot:\n{text}\n"
+        self._render_transcript()
+
+    def finish_bot_message(self, text: str):
+        self.update_bot_message(text)
+        self._stream_anchor = None
+
+    async def prompt(self) -> str:
+        loop = asyncio.get_running_loop()
+        self._pending_input = loop.create_future()
+        self.app.layout.focus(self.input)
+        return await self._pending_input
+
+    async def run(self, worker):
+        self.app.create_background_task(worker())
+        await self.app.run_async()
 
 # ──────────────────────────────────────────
 # Settings helpers
@@ -225,30 +685,30 @@ async def seed_username(store, user_id: str):
 # Streaming response
 # ──────────────────────────────────────────
 
-async def stream_response(graph, user_input: str, config: dict) -> str:
+async def stream_response(graph, user_input: str, config: dict, ui: ChatUI) -> str:
     full_text = ""
-    console.print("\n[bold green]Bot:[/]")
+    ui.start_bot_message()
 
-    with Live("", console=console, refresh_per_second=15) as live:
-        async for chunk, metadata in graph.astream(
-            {"messages": [{"role": "user", "content": user_input}]},
-            config=config,
-            stream_mode="messages",
+    async for chunk, metadata in graph.astream(
+        {"messages": [{"role": "user", "content": user_input}]},
+        config=config,
+        stream_mode="messages",
+    ):
+        if (
+            metadata.get("langgraph_node") == "chat"
+            and isinstance(chunk, AIMessageChunk)
+            and isinstance(chunk.content, str)
+            and chunk.content
         ):
-            if (
-                metadata.get("langgraph_node") == "chat"
-                and isinstance(chunk, AIMessageChunk)
-                and isinstance(chunk.content, str)
-                and chunk.content
-            ):
-                full_text += chunk.content
-                live.update(full_text)
-
-    console.print()
+            if not full_text:
+                ui.set_status("")
+            full_text += chunk.content
+            ui.update_bot_message(full_text)
 
     if not full_text:
-        console.print("[red]No response received. Check your API key in settings.json.[/]")
+        full_text = "No response received. Check your API key in settings.json."
 
+    ui.finish_bot_message(full_text)
     return full_text
 
 
@@ -297,56 +757,118 @@ async def run():
                 new_thread_id = str(uuid.uuid4())
                 return {"configurable": {"user_id": user_id, "thread_id": new_thread_id}}
 
-            # always start fresh on launch
+            ui = ChatUI()
             config = start_new_conversation()
-            console.print(f"\n[dim]New session started. Type /help for commands.[/]\n")
+            ui.append_block("Welcome back, " + settings["username"] + "!")
+            ui.append_block("New session started. Type /help for commands.")
 
-            # ── chat loop ──
-            while True:
-                try:
-                    user_input = (await session.prompt_async("You: ")).strip()
-                except (KeyboardInterrupt, EOFError):
-                    console.print("\n[dim]Bye![/]")
-                    break
+            async def chat_loop():
+                nonlocal config
+                resume_options = None
 
-                if not user_input:
-                    continue
+                while True:
+                    try:
+                        user_input = (await ui.prompt()).strip()
+                    except (KeyboardInterrupt, EOFError):
+                        ui.append_block("Bye!")
+                        ui.app.exit()
+                        break
 
-                if user_input == "/exit":
-                    console.print("[dim]Bye![/]")
-                    break
+                    if not user_input:
+                        continue
 
-                elif user_input == "/help":
-                    console.print("\n[bold yellow]Available commands:[/]")
-                    for cmd, desc in COMMANDS.items():
-                        console.print(f"  [cyan]{cmd}[/]  —  {desc}")
-                    console.print()
+                    if resume_options is not None:
+                        if user_input == "__cancel_select__":
+                            ui.append_block("Resume cancelled.")
+                            resume_options = None
+                            ui.cancel_selection()
+                            continue
 
-                elif user_input == "/settings":
-                    console.print("\n[bold yellow]Current settings:[/]")
-                    s = load_settings()
-                    for k, v in s.items():
-                        # mask api key
-                        display = v[:6] + "..." if k == "api_key" and len(v) > 6 else v
-                        console.print(f"  [cyan]{k}[/]: {display}")
-                    console.print()
+                        if user_input != "__select__":
+                            continue
 
-                elif user_input == "/new":
-                    config = start_new_conversation()
-                    session = create_chat_session()
-                    console.clear()
-                    console.print(Rule("[bold cyan]Chatbot[/]"))
-                    console.print("[dim]New conversation started.[/]\n")
+                        selected = ui.current_selection()
+                        if selected is None:
+                            resume_options = None
+                            ui.cancel_selection()
+                            continue
 
-                # elif user_input == "/memory":
-                #     await show_memory(store, user_id)
+                        resume_options = None
+                        ui.cancel_selection()
+                        config = {
+                            "configurable": {
+                                "user_id": user_id,
+                                "thread_id": selected["thread_id"],
+                            }
+                        }
 
-                elif user_input.startswith("/"):
-                    console.print(f"[red]Unknown command:[/] {user_input}. Type /help.\n")
+                        snapshot = await load_thread_snapshot(checkpointer, selected["thread_id"])
+                        ui.clear_transcript()
+                        if snapshot is not None:
+                            messages = snapshot.checkpoint.get("channel_values", {}).get("messages", [])
+                            transcript = _render_messages(messages)
+                            if transcript:
+                                ui.append_block(transcript)
+                        ui.append_block(
+                            "Resumed session: "
+                            + _format_checkpoint_time(selected["ts"])
+                            + f"  ({selected['thread_id'][:8]})"
+                        )
+                        continue
 
-                else:
-                    console.print(f"[dim]{random.choice(STATUS_MESSAGES)}[/]", end="\r")
-                    await stream_response(graph, user_input, config)
+                    ui.append_block(f"You: {user_input}")
+
+                    if user_input == "/exit":
+                        ui.append_block("Bye!")
+                        ui.app.exit()
+                        break
+
+                    elif user_input == "/help":
+                        lines = ["Available commands:"]
+                        for cmd, desc in COMMANDS.items():
+                            lines.append(f"  {cmd}  -  {desc}")
+                        ui.append_block("\n".join(lines))
+
+                    elif user_input == "/settings":
+                        s = load_settings()
+                        lines = ["Current settings:"]
+                        for k, v in s.items():
+                            display = v[:6] + "..." if k == "api_key" and len(v) > 6 else v
+                            lines.append(f"  {k}: {display}")
+                        ui.append_block("\n".join(lines))
+
+                    elif user_input == "/new":
+                        config = start_new_conversation()
+                        ui.clear_transcript()
+                        ui.append_block("New conversation started. Type /help for commands.")
+
+                    elif user_input == "/resume":
+                        sessions = await list_user_sessions(checkpointer, user_id)
+                        if not sessions:
+                            ui.append_block("No saved conversations found.")
+                            continue
+
+                        resume_options = sessions
+                        ui.start_selection(
+                            "Saved conversations:",
+                            sessions,
+                            "Use Up/Down and Enter to resume. Esc or Ctrl+C cancels.",
+                        )
+
+                    # elif user_input == "/memory":
+                    #     await show_memory(store, user_id)
+
+                    elif user_input.startswith("/"):
+                        ui.append_block(f"Unknown command: {user_input}. Type /help.")
+
+                    else:
+                        ui.set_status(random.choice(STATUS_MESSAGES))
+                        try:
+                            await stream_response(graph, user_input, config, ui)
+                        finally:
+                            ui.set_status("")
+
+            await ui.run(chat_loop)
 
 
 if __name__ == "__main__":
