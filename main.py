@@ -1,10 +1,12 @@
 import uuid
 import asyncio
+import ctypes
 import json
 import os
 import random
-import subprocess
+import time
 from datetime import datetime
+from ctypes import wintypes
 
 from rich.console import Console
 from rich.rule import Rule
@@ -15,10 +17,12 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.containers import Float, FloatContainer
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.layout.processors import Processor, Transformation
 from prompt_toolkit.shortcuts import radiolist_dialog, input_dialog, message_dialog
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
@@ -53,6 +57,7 @@ APP_STYLE = Style.from_dict(
         "transcript": "",
         "status": "",
         "input": "",
+        "user-line": "bg:#2a2a2a #ffffff",
         "completion-menu": "",
         "completion-menu.completion.current": "reverse",
         "completion-menu.meta.completion": "",
@@ -62,33 +67,88 @@ APP_STYLE = Style.from_dict(
 
 
 class WindowsClipboard(Clipboard):
-    def get_data(self) -> ClipboardData:
-        try:
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return ClipboardData("")
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
 
-        if result.returncode != 0:
+    def __init__(self):
+        self.user32 = ctypes.windll.user32
+        self.kernel32 = ctypes.windll.kernel32
+
+        self.user32.OpenClipboard.argtypes = [wintypes.HWND]
+        self.user32.OpenClipboard.restype = wintypes.BOOL
+        self.user32.CloseClipboard.argtypes = []
+        self.user32.CloseClipboard.restype = wintypes.BOOL
+        self.user32.EmptyClipboard.argtypes = []
+        self.user32.EmptyClipboard.restype = wintypes.BOOL
+        self.user32.GetClipboardData.argtypes = [wintypes.UINT]
+        self.user32.GetClipboardData.restype = wintypes.HANDLE
+        self.user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        self.user32.SetClipboardData.restype = wintypes.HANDLE
+
+        self.kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        self.kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        self.kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        self.kernel32.GlobalLock.restype = wintypes.LPVOID
+        self.kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        self.kernel32.GlobalUnlock.restype = wintypes.BOOL
+        self.kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+        self.kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+    def _open(self) -> bool:
+        for _ in range(5):
+            if self.user32.OpenClipboard(None):
+                return True
+            time.sleep(0.02)
+        return False
+
+    def get_data(self) -> ClipboardData:
+        if not self._open():
             return ClipboardData("")
-        return ClipboardData(result.stdout.rstrip("\r\n"))
+        try:
+            handle = self.user32.GetClipboardData(self.CF_UNICODETEXT)
+            if not handle:
+                return ClipboardData("")
+            locked = self.kernel32.GlobalLock(handle)
+            if not locked:
+                return ClipboardData("")
+            try:
+                return ClipboardData(ctypes.wstring_at(locked).rstrip("\r\n"))
+            finally:
+                self.kernel32.GlobalUnlock(handle)
+        except Exception:
+            return ClipboardData("")
+        finally:
+            self.user32.CloseClipboard()
 
     def set_data(self, data: ClipboardData) -> None:
-        try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", "Set-Clipboard"],
-                input=data.text,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
+        if not self._open():
             return
+        handle = None
+        clipboard_owns_handle = False
+        try:
+            text = data.text or ""
+            buffer = ctypes.create_unicode_buffer(text)
+            size = ctypes.sizeof(buffer)
+            handle = self.kernel32.GlobalAlloc(self.GMEM_MOVEABLE, size)
+            if not handle:
+                return
+            locked = self.kernel32.GlobalLock(handle)
+            if not locked:
+                return
+            try:
+                ctypes.memmove(locked, buffer, size)
+            finally:
+                self.kernel32.GlobalUnlock(handle)
+
+            self.user32.EmptyClipboard()
+            if self.user32.SetClipboardData(self.CF_UNICODETEXT, handle):
+                clipboard_owns_handle = True
+        except Exception:
+            pass
+        finally:
+            self.user32.CloseClipboard()
+            if handle and not clipboard_owns_handle:
+                self.kernel32.GlobalFree(handle)
 
 
 class SlashCommandCompleter(Completer):
@@ -107,6 +167,24 @@ class SlashCommandCompleter(Completer):
                     display=command,
                     display_meta=description,
                 )
+
+
+class UserLineHighlighter(Processor):
+    """Highlight transcript lines that represent user messages."""
+
+    def apply_transformation(self, transformation_input):
+        fragments = transformation_input.fragments
+        line_text = "".join(text for _, text, *_ in fragments)
+        if line_text.startswith("> "):
+            line_width = len(line_text)
+            pad = max(0, transformation_input.width - line_width)
+            styled_line = line_text + (" " * pad)
+            return Transformation(
+                [("class:user-line", styled_line)],
+                source_to_display=lambda i: i,
+                display_to_source=lambda i: min(i, line_width),
+            )
+        return Transformation(fragments)
 
 
 def build_key_bindings() -> KeyBindings:
@@ -194,10 +272,52 @@ def _render_messages(messages: list) -> str:
         if not content:
             continue
         if role in {"human", "user"}:
-            blocks.append(f"You: {content}")
+            blocks.append(f"> {content}")
         elif role in {"ai", "assistant"}:
-            blocks.append(f"Bot:\n{content}")
+            blocks.append(_format_ai_output(content))
     return "\n\n".join(blocks)
+
+
+def _format_ai_output(text: str) -> str:
+    """Format assistant output for a plain terminal transcript."""
+    text = _strip_code_fences(text)
+    if _looks_like_code(text):
+        return text
+    lines = text.splitlines()
+    if not lines:
+        return "•"
+    first = f"• {lines[0]}"
+    rest = [f"  {line}" if line else "" for line in lines[1:]]
+    return "\n".join([first, *rest])
+
+
+def _strip_code_fences(text: str) -> str:
+    lines = text.splitlines()
+    cleaned = []
+    for line in lines:
+        if line.strip().startswith("```"):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip("\n")
+
+
+def _looks_like_code(text: str) -> bool:
+    if "\nclass " in f"\n{text}" or "\ndef " in f"\n{text}":
+        return True
+    code_markers = (
+        "import ",
+        "from ",
+        "return ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "#include",
+    )
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    return sum(line.startswith(code_markers) for line in lines) >= 2
 
 
 async def list_user_sessions(checkpointer, user_id: str, limit: int = 20) -> list[dict]:
@@ -236,6 +356,7 @@ class ChatUI:
         self._selection_index = 0
         self._selection_title = ""
         self._selection_instruction = ""
+        self._ctrl_c_armed_until = 0.0
 
         self.transcript = TextArea(
             text="",
@@ -245,6 +366,7 @@ class ChatUI:
             scrollbar=True,
             wrap_lines=True,
             style="class:transcript",
+            input_processors=[UserLineHighlighter()],
         )
         self.input = TextArea(
             prompt="> ",
@@ -281,7 +403,7 @@ class ChatUI:
         self.app = Application(
             layout=Layout(layout, focused_element=self.input),
             full_screen=True,
-            mouse_support=False,
+            mouse_support=True,
             style=APP_STYLE,
             key_bindings=self._build_key_bindings(),
             clipboard=WindowsClipboard(),
@@ -314,7 +436,7 @@ class ChatUI:
         def _(event):
             if self.app.layout.has_focus(self.input):
                 self.app.layout.focus(self.transcript)
-                self.set_status("Transcript focus. Ctrl+A copies all, Ctrl+Space starts selection, Tab returns.")
+                self.set_status("Transcript focus. Mouse wheel/PageUp/PageDown scroll, Ctrl+A copies all, Tab returns.")
             else:
                 self.app.layout.focus(self.input)
                 self.set_status("")
@@ -334,6 +456,9 @@ class ChatUI:
                 self._selection_index = (self._selection_index - 1) % len(self._selection_options)
                 self._render_transcript()
                 return
+            if self.app.layout.has_focus(self.transcript):
+                self._scroll_transcript(-1)
+                return
             event.app.current_buffer.auto_up()
 
         @bindings.add("down")
@@ -342,42 +467,47 @@ class ChatUI:
                 self._selection_index = (self._selection_index + 1) % len(self._selection_options)
                 self._render_transcript()
                 return
+            if self.app.layout.has_focus(self.transcript):
+                self._scroll_transcript(1)
+                return
             event.app.current_buffer.auto_down()
 
         @bindings.add("pageup")
         def _(event):
-            self.app.layout.focus(self.transcript)
-            self.transcript.buffer.cursor_up(count=15)
-            self.set_status("Scrolling transcript. Tab returns to input.")
+            self._scroll_transcript(-self._page_scroll_count())
 
         @bindings.add("pagedown")
         def _(event):
-            self.app.layout.focus(self.transcript)
-            self.transcript.buffer.cursor_down(count=15)
-            self.set_status("Scrolling transcript. Tab returns to input.")
+            self._scroll_transcript(self._page_scroll_count())
 
         @bindings.add("escape", "up")
         def _(event):
-            self.app.layout.focus(self.transcript)
-            self.transcript.buffer.cursor_up(count=3)
-            self.set_status("Scrolling transcript. Tab returns to input.")
+            self._scroll_transcript(-3)
 
         @bindings.add("escape", "down")
         def _(event):
-            self.app.layout.focus(self.transcript)
-            self.transcript.buffer.cursor_down(count=3)
-            self.set_status("Scrolling transcript. Tab returns to input.")
+            self._scroll_transcript(3)
+
+        @bindings.add(Keys.ScrollUp)
+        def _(event):
+            self._scroll_transcript(-3)
+
+        @bindings.add(Keys.ScrollDown)
+        def _(event):
+            self._scroll_transcript(3)
 
         @bindings.add("home")
         def _(event):
             self.app.layout.focus(self.transcript)
             self.transcript.buffer.cursor_position = 0
+            self.transcript.window.vertical_scroll = 0
             self.set_status("Top of transcript. Tab returns to input.")
 
         @bindings.add("end")
         def _(event):
             self.app.layout.focus(self.transcript)
             self.transcript.buffer.cursor_position = len(self.transcript.buffer.text)
+            self.transcript.window.vertical_scroll = 10**9
             self.set_status("Bottom of transcript. Tab returns to input.")
 
         @bindings.add("escape")
@@ -408,8 +538,13 @@ class ChatUI:
                 if self._pending_input is not None and not self._pending_input.done():
                     self._pending_input.set_result("__cancel_select__")
                 return
-            if self._pending_input is not None and not self._pending_input.done():
-                self._pending_input.set_exception(EOFError())
+            now = time.monotonic()
+            if now < self._ctrl_c_armed_until:
+                if self._pending_input is not None and not self._pending_input.done():
+                    self._pending_input.set_exception(EOFError())
+                return
+            self._ctrl_c_armed_until = now + 2.5
+            self.set_status("Press Ctrl-C again to exit")
 
         @bindings.add("c-space")
         def _(event):
@@ -441,6 +576,24 @@ class ChatUI:
 
     def _get_status_bar_text(self):
         return [("class:status", f" {self._status}" if self._status else "")]
+
+    def _page_scroll_count(self) -> int:
+        info = self.transcript.window.render_info
+        if info is None:
+            return 15
+        return max(1, info.window_height - 2)
+
+    def _scroll_transcript(self, amount: int):
+        self.app.layout.focus(self.transcript)
+        scroll_one = (
+            self.transcript.window._scroll_down
+            if amount > 0
+            else self.transcript.window._scroll_up
+        )
+        for _ in range(abs(amount)):
+            scroll_one()
+        self.set_status("Scrolling transcript. Mouse wheel/PageUp/PageDown move history, Tab returns to input.")
+        self.app.invalidate()
 
     def _selection_block(self) -> str:
         if not self._selection_options:
@@ -476,7 +629,7 @@ class ChatUI:
     def append_block(self, text: str):
         if self._transcript_text:
             self._transcript_text += "\n"
-        self._transcript_text += text.rstrip() + "\n"
+        self._transcript_text += text.strip("\n") + "\n"
         self._render_transcript()
 
     def clear_transcript(self):
@@ -515,13 +668,13 @@ class ChatUI:
         if self._transcript_text and not self._transcript_text.endswith("\n"):
             self._transcript_text += "\n"
         self._stream_anchor = len(self._transcript_text)
-        self._transcript_text += "Bot:\n"
+        self._transcript_text += "• "
         self._render_transcript()
 
     def update_bot_message(self, text: str):
         if self._stream_anchor is None:
             self.start_bot_message()
-        self._transcript_text = self._transcript_text[: self._stream_anchor] + f"Bot:\n{text}\n"
+        self._transcript_text = self._transcript_text[: self._stream_anchor] + _format_ai_output(text) + "\n"
         self._render_transcript()
 
     def finish_bot_message(self, text: str):
@@ -816,7 +969,7 @@ async def run():
                         )
                         continue
 
-                    ui.append_block(f"You: {user_input}")
+                    ui.append_block(f"> {user_input}")
 
                     if user_input == "/exit":
                         ui.append_block("Bye!")
