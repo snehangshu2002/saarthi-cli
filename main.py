@@ -5,7 +5,7 @@ from rich.rule import Rule
 from prompt_toolkit import prompt
 from prompt_toolkit.history import InMemoryHistory
 
-from chatbot import graph
+from chatbot import graph,store
 
 console = Console()
 history = InMemoryHistory()
@@ -24,8 +24,8 @@ def show_help():
     console.print()
 
 
-def show_memory(store, user_id):
-    items = store.search(("user", user_id, "details"))
+async def show_memory(store, user_id):
+    items = await store.search(("user", user_id, "details"))
     if not items:
         console.print("[dim]No memories stored yet.[/]\n")
         return
@@ -34,7 +34,7 @@ def show_memory(store, user_id):
         console.print(f"  [green]•[/] {it.value['data']}")
     console.print()
 
-def run():
+async def run():
     # ask for username once at start
     console.print(Rule("[bold cyan]Chatbot[/]"))
     user_id = prompt("Enter username: ").strip() or "default"
@@ -70,7 +70,7 @@ def run():
 
         elif user_input == "/memory":
             from chatbot import store   # import the store from your graph module
-            show_memory(store, user_id)
+            await show_memory(store, user_id)
             continue
 
         elif user_input.startswith("/"):
@@ -79,7 +79,7 @@ def run():
 
         # --- normal chat turn ---
         with console.status("[cyan]Thinking...[/]", spinner="dots"):
-            result = graph.invoke(
+            result = await graph.ainvoke(
                 {"messages": [{"role": "user", "content": user_input}]},
                 config=config
             )
@@ -91,4 +91,4 @@ def run():
         console.print()
 
 if __name__ == "__main__":
-    run()
+    asyncio.run(run())
