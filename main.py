@@ -2,41 +2,39 @@ import uuid
 import asyncio
 import json
 import os
+import random
+
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
 from rich.live import Live
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
-from langchain_mistralai import MistralAIEmbeddings
+from prompt_toolkit.shortcuts import radiolist_dialog, input_dialog, message_dialog
+from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.sqlite.aio import AsyncSqliteStore
-import random
-from chatbot import uncompiled_builder
+
+from chatbot import build_graph
+from providers import get_models, SUPPORTED_PROVIDERS
 
 console = Console()
-embedding_model = MistralAIEmbeddings()
 
 SETTINGS_FILE = "settings.json"
-
+DATA_DIR      = "data"
 
 STATUS_MESSAGES = [
-    "Thinking...",
-    "Planning...",
-    "Searching memory...",
-    "Reasoning...",
-    "Analyzing context...",
-    "Writing response...",
-    "Connecting ideas...",
-    "Checking memories...",
-    "Processing...",
-    "Building answer..."
+    "Thinking...", "Planning...", "Searching memory...",
+    "Reasoning...", "Analyzing context...", "Writing response...",
+    "Connecting ideas...", "Checking memories...", "Processing...",
+    "Building answer...",
 ]
+
 COMMANDS = {
-    "/exit": "Quit the chatbot",
-    "/clear": "Start a new conversation (new thread)",
-    "/memory": "Show what the bot remembers about you",
-    "/help": "Show available commands",
+    "/exit":     "Quit the chatbot",
+    "/new":      "Start a new conversation",
+    # "/memory":   "Show what the bot remembers about you",
+    "/help":     "Show available commands",
     "/settings": "Show current settings",
 }
 
@@ -45,16 +43,16 @@ COMMANDS = {
 # ──────────────────────────────────────────
 
 def load_settings() -> dict:
-    defaults = {"username": ""}
+    defaults = {"username": "", "provider": "", "api_key": ""}
     if not os.path.exists(SETTINGS_FILE):
-        save_settings(defaults)  
+        save_settings(defaults)
         return defaults
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         return {**defaults, **data}
     except (json.JSONDecodeError, OSError):
-        save_settings(defaults)  
+        save_settings(defaults)
         return defaults
 
 
@@ -63,68 +61,154 @@ def save_settings(settings: dict) -> None:
         json.dump(settings, f, indent=2)
 
 
+def settings_complete(settings: dict) -> bool:
+    """True only if all required fields are filled."""
+    return bool(
+        settings.get("username", "").strip()
+        and settings.get("provider", "").strip()
+        and settings.get("api_key", "").strip()
+    )
+
+
 # ──────────────────────────────────────────
-# Chat helpers
+# First-run setup
 # ──────────────────────────────────────────
 
-def show_help():
-    console.print("\n[bold yellow]Available commands:[/]")
-    for cmd, desc in COMMANDS.items():
-        console.print(f"  [cyan]{cmd}[/]  —  {desc}")
-    console.print()
+async def first_run_setup(session: PromptSession) -> dict:
+    """
+    Interactive first-run wizard — fully dialog driven.
+    Step 1: username  (plain prompt)
+    Step 2: provider  (radiolist dialog — ↑↓ + Enter)
+    Step 3: api key   (input_dialog with password=True — hidden, Enter confirms)
+    Step 4: summary   (message_dialog — shows selected model, masked key)
+    """
+    console.print(Rule("[bold cyan]First time setup[/]"))
+    console.print("[dim]This runs once. Answers are saved to settings.json.[/]\n")
+
+    # ── step 1: username ──
+    username = (await session.prompt_async("Choose a username: ")).strip()
+    if not username:
+        username = "default"
+
+    # ── step 2: provider via radiolist dialog ──
+    # radiolist: space selects, Enter confirms — works without clicking OK
+    provider = await radiolist_dialog(
+        title="Step 1 of 2 — Select AI Provider",
+        text="Use  ↑ ↓  to move,  Space  to select,  Enter  to confirm.",
+        values=[(key, label) for key, label in SUPPORTED_PROVIDERS.items()],
+        default="mistral",
+        ok_text="Continue →",
+        cancel_text="Quit",
+    ).run_async()
+
+    if provider is None:
+        console.print("[yellow]Setup cancelled.[/]")
+        raise SystemExit(0)
+
+    # ── step 3: api key via input_dialog (password=True hides input) ──
+    key_hints = {
+        "mistral": "console.mistral.ai",
+        "openai":  "platform.openai.com",
+        "google":  "aistudio.google.com",
+    }
+    provider_label = SUPPORTED_PROVIDERS[provider]
+
+    api_key = await input_dialog(
+        title="Step 2 of 2 — API Key",
+        text=(
+            f"Provider: {provider_label}\n\n"
+            f"Paste your API key below.\n"
+            f"Get it at: {key_hints.get(provider, '')}\n\n"
+            f"(Input is hidden)"
+        ),
+        password=True,
+        ok_text="Save →",
+        cancel_text="Back",
+    ).run_async()
+
+    if api_key is None:
+        # user hit Back — restart setup
+        console.print("[dim]Going back...[/]")
+        return await first_run_setup(session)
+
+    api_key = api_key.strip()
+    if not api_key:
+        console.print("[red]No API key entered. Edit settings.json to add it later.[/]")
+
+    # ── step 4: confirmation dialog ──
+    masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "****"
+    await message_dialog(
+        title="Setup Complete",
+        text=(
+            f"  Username : {username}\n"
+            f"  Provider : {provider_label}\n"
+            f"  API key  : {masked_key}\n\n"
+            f"Settings saved to {SETTINGS_FILE}.\n"
+            f"Press Enter to start chatting."
+        ),
+        ok_text="Start Chatting →",
+    ).run_async()
+
+    settings = {
+        "username": username,
+        "provider": provider,
+        "api_key":  api_key,
+    }
+    save_settings(settings)
+    return settings
 
 
-async def show_memory(store, user_id):
-    try:
-        items = await store.alist(("user", user_id, "details"))
-    except AttributeError:
-        items = await store.asearch(("user", user_id, "details"), query="user profile", limit=100)
-    items = list(items)
-    if not items:
-        console.print("[dim]No memories stored yet.[/]\n")
-        return
-    console.print("\n[bold yellow]What I remember about you:[/]")
-    for it in items:
-        console.print(f"  [green]•[/] {it.value['data']}")
-    console.print()
+# ──────────────────────────────────────────
+# Memory helpers
+# ──────────────────────────────────────────
+
+# async def show_memory(store, user_id: str):
+#     items = await store.asearch(("user", user_id, "details"), query=None, limit=500)
+#     if not items:
+#         console.print("[dim]No memories stored yet.[/]\n")
+#         return
+#     console.print("\n[bold yellow]What I remember about you:[/]")
+#     for it in items:
+#         console.print(f"  [green]•[/] {it.value['data']}")
+#     console.print()
 
 
 async def seed_username(store, user_id: str):
-    """Write the username into long-term memory once on login."""
     namespace = ("user", user_id, "details")
-    try:
-        existing = await store.alist(namespace)
-    except AttributeError:
-        existing = await store.asearch(namespace, query="username name", limit=100)
-    existing = list(existing)
-
-    already_stored = any(
-        user_id.lower() in it.value.get("data", "").lower()
-        for it in existing
-    )
-    if not already_stored:
+    existing  = await store.asearch(namespace, query=None, limit=500)
+    already   = any(user_id.lower() in it.value.get("data", "").lower() for it in existing)
+    if not already:
         await store.aput(namespace, str(uuid.uuid4()), {"data": f"User's username is {user_id}"})
 
 
+# ──────────────────────────────────────────
+# Streaming response
+# ──────────────────────────────────────────
+
 async def stream_response(graph, user_input: str, config: dict) -> str:
-    """Stream the assistant reply token-by-token."""
     full_text = ""
     console.print("\n[bold green]Bot:[/]")
+
     with Live("", console=console, refresh_per_second=15) as live:
-        async for event in graph.astream_events(
+        async for chunk, metadata in graph.astream(
             {"messages": [{"role": "user", "content": user_input}]},
             config=config,
-            version="v2",
+            stream_mode="messages",
         ):
-            kind = event.get("event")
-            tags = event.get("metadata", {}).get("langgraph_node", "")
-            if kind == "on_chat_model_stream" and tags == "chat":
-                chunk = event["data"]["chunk"]
-                token = chunk.content
-                if isinstance(token, str):
-                    full_text += token
-                    live.update(full_text)
+            if (
+                metadata.get("langgraph_node") == "chat"
+                and isinstance(chunk, AIMessageChunk)
+                and isinstance(chunk.content, str)
+                and chunk.content
+            ):
+                full_text += chunk.content
+                live.update(full_text)
+
     console.print()
+
+    if not full_text:
+        console.print("[red]No response received. Check your API key in settings.json.[/]")
+
     return full_text
 
 
@@ -133,43 +217,53 @@ async def stream_response(graph, user_input: str, config: dict) -> str:
 # ──────────────────────────────────────────
 
 async def run():
+    os.makedirs(DATA_DIR, exist_ok=True)
     session = PromptSession(history=InMemoryHistory())
+
     console.print(Rule("[bold cyan]Chatbot[/]"))
 
-    # Load settings and resolve username
+    # ── resolve settings ──
     settings = load_settings()
-    user_id = settings.get("username", "").strip()
 
-    if not user_id:
-        # First run or cleared — ask once, then persist
-        user_id = (await session.prompt_async("Enter username: ")).strip() or "default"
-        settings["username"] = user_id
-        save_settings(settings)
-        console.print(f"[dim]Username saved to {SETTINGS_FILE}. You won't be asked again.[/]")
+    if not settings_complete(settings):
+        settings = await first_run_setup(session)
     else:
-        console.print(f"[dim]Welcome back, [bold]{user_id}[/]![/]")
+        console.print(f"[dim]Welcome back, [bold]{settings['username']}[/]![/]")
 
-    async with AsyncSqliteSaver.from_conn_string("data/checkpoints.db") as checkpointer:
+    user_id  = settings["username"]
+    provider = settings["provider"]
+    api_key  = settings["api_key"]
+
+    # ── init models ──
+    try:
+        model, embedding_model, dims = get_models(provider, api_key)
+    except Exception as e:
+        console.print(f"[red]Failed to load provider '{provider}': {e}[/]")
+        console.print("[dim]Edit settings.json and restart.[/]")
+        return
+
+    # ── open db connections ──
+    async with AsyncSqliteSaver.from_conn_string(f"{DATA_DIR}/checkpoints.db") as checkpointer:
         async with AsyncSqliteStore.from_conn_string(
-            "data/memory.db",
-            index={"embed": embedding_model, "dims": 1024},
+            f"{DATA_DIR}/memory.db",
+            index={"embed": embedding_model, "dims": dims},
         ) as store:
             await store.setup()
 
-            graph = uncompiled_builder.compile(checkpointer=checkpointer, store=store)
-
+            graph = build_graph(model, checkpointer, store)
             await seed_username(store, user_id)
 
+            # always start fresh on launch
             thread_id = str(uuid.uuid4())
-            config = {"configurable": {"user_id": user_id, "thread_id": thread_id}}
+            config    = {"configurable": {"user_id": user_id, "thread_id": thread_id}}
+            console.print(f"\n[dim]New session started. Type /help for commands.[/]\n")
 
-            console.print(f"\n[dim]Session started. Type /help for commands.[/]\n")
-
+            # ── chat loop ──
             while True:
                 try:
                     user_input = (await session.prompt_async("You: ")).strip()
                 except (KeyboardInterrupt, EOFError):
-                    console.print("\n[dim]Interrupted. Bye![/]")
+                    console.print("\n[dim]Bye![/]")
                     break
 
                 if not user_input:
@@ -180,34 +274,33 @@ async def run():
                     break
 
                 elif user_input == "/help":
-                    show_help()
-                    continue
+                    console.print("\n[bold yellow]Available commands:[/]")
+                    for cmd, desc in COMMANDS.items():
+                        console.print(f"  [cyan]{cmd}[/]  —  {desc}")
+                    console.print()
 
                 elif user_input == "/settings":
-                    console.print(f"\n[bold yellow]Current settings:[/]")
-                    for k, v in load_settings().items():
-                        console.print(f"  [cyan]{k}[/]: {v}")
+                    console.print("\n[bold yellow]Current settings:[/]")
+                    s = load_settings()
+                    for k, v in s.items():
+                        # mask api key
+                        display = v[:6] + "..." if k == "api_key" and len(v) > 6 else v
+                        console.print(f"  [cyan]{k}[/]: {display}")
                     console.print()
-                    continue
 
-                elif user_input == "/clear":
+                elif user_input == "/new":
                     thread_id = str(uuid.uuid4())
                     config["configurable"]["thread_id"] = thread_id
                     console.print("[dim]New conversation started.[/]\n")
-                    continue
 
-                elif user_input == "/memory":
-                    await show_memory(store, user_id)
-                    continue
+                # elif user_input == "/memory":
+                #     await show_memory(store, user_id)
 
                 elif user_input.startswith("/"):
                     console.print(f"[red]Unknown command:[/] {user_input}. Type /help.\n")
-                    continue
 
-                with console.status(
-                    f"[dim]{random.choice(STATUS_MESSAGES)}[/]",
-                    spinner="dots"
-                ):
+                else:
+                    console.print(f"[dim]{random.choice(STATUS_MESSAGES)}[/]", end="\r")
                     await stream_response(graph, user_input, config)
 
 
