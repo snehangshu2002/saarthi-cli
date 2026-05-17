@@ -6,45 +6,20 @@ from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END, MessagesState
-from langgraph.store.memory import InMemoryStore
 from langgraph.store.base import BaseStore
-from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, Field
-from langgraph.store.sqlite import AsyncSqliteStore
-from langgraph.checkpoint.sqlite import AsyncSqliteSaver
 import os
-import sqlite3
 
 load_dotenv()
+
+os.makedirs("data", exist_ok=True)
 
 # ──────────────────────────────────────────
 # Models
 # ──────────────────────────────────────────
 
-model = ChatMistralAI()          
+model = ChatMistralAI()
 embedding_model = MistralAIEmbeddings()
-
-# ──────────────────────────────────────────
-# Store + Checkpointer  (module-level so main.py can import store)
-# ──────────────────────────────────────────
-
-os.makedirs("data", exist_ok=True)
-
-# Separate connection for checkpoints
-checkpoint_conn = AsyncSqliteSaver.connect(
-    "data/checkpoints.db",
-    check_same_thread=False
-)
-
-# Separate connection for store
-store_conn = AsyncSqliteStore.connect(
-    "data/memory.db",
-    check_same_thread=False
-)
-
-store=SqliteStore(conn=store_conn,index={"embed": embedding_model, "dims": 1024})
-store.setup()
-checkpointer=SqliteSaver(conn=checkpoint_conn)
 
 # ──────────────────────────────────────────
 # Prompts
@@ -122,21 +97,41 @@ class ChatState(MessagesState):
 
 memory_extractor = model.with_structured_output(MemoryDecision)
 
+
+# ──────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────
+
+async def _list_all_memories(store: BaseStore, namespace: tuple) -> list:
+    """
+    Fetch every memory for this user without any score filter.
+    list() returns all items; we fall back to a broad asearch if list() is unavailable.
+    """
+    try:
+        # AsyncSqliteStore supports .alist() to retrieve all items in a namespace
+        items = await store.alist(namespace)
+    except AttributeError:
+        # Fallback: search with a very generic query and no score cutoff
+        items = await store.asearch(namespace, query="user profile preferences", limit=100)
+    return list(items)
+
+
 # ──────────────────────────────────────────
 # Nodes
 # ──────────────────────────────────────────
 
 async def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
-    """Extract facts from the latest user message and persist them to the store."""
+    """Extract facts from the latest user message and persist them."""
     user_id = config["configurable"]["user_id"]
     namespace = ("user", user_id, "details")
     last_message = state["messages"][-1].content
 
-    items:list[Document] = await store.search(namespace, query=last_message, limit=5)
-    filtered = [it for it in items if it.score > 0.70]
+    # FIX: fetch ALL existing memories (no score filter) so the extractor
+    # has complete context and update/delete keys are always resolvable.
+    all_items = await _list_all_memories(store, namespace)
     existing = (
-        "\n".join(f"[{it.key}] {it.value.get('data', '')}" for it in filtered)
-        if filtered
+        "\n".join(f"[{it.key}] {it.value.get('data', '')}" for it in all_items)
+        if all_items
         else "(empty)"
     )
 
@@ -146,36 +141,35 @@ async def remember_node(state: ChatState, config: RunnableConfig, store: BaseSto
     ])
 
     if decision.should_write:
+        # Build a key->item map from ALL items for reliable update/delete lookup
+        item_map = {it.key: it for it in all_items}
+
         for mem in decision.memories:
             if not mem.is_new and mem.action == "add":
                 continue
             if mem.action == "add":
-                await store.put(namespace, str(uuid.uuid4()), {"data": mem.text})
-            elif mem.action in ("update", "delete"):
-                for item in items:
-                    if item.key == mem.replaces:
-                        if mem.action == "update":
-                            await store.put(namespace, item.key, {"data": mem.text})
-                        elif mem.action == "delete":
-                            await store.delete(namespace, item.key)
-                        break
+                await store.aput(namespace, str(uuid.uuid4()), {"data": mem.text})
+            elif mem.action == "update" and mem.replaces in item_map:
+                await store.aput(namespace, mem.replaces, {"data": mem.text})
+            elif mem.action == "delete" and mem.replaces in item_map:
+                await store.adelete(namespace, mem.replaces)
 
     return {}
 
 
 async def chat_node(state: ChatState, config: RunnableConfig, store: BaseStore):
-    """Build the full message list and call the model."""
+    """Retrieve ALL memories and call the model."""
     user_id = config["configurable"]["user_id"]
     namespace = ("user", user_id, "details")
-    last_message = state["messages"][-1].content
 
-    items:list[Document] = await store.search(namespace, query=last_message, limit=5)
-    filtered = [it for it in items if it.score > 0.70]
-    user_details = "\n".join(it.value["data"] for it in filtered) if filtered else ""
+    # FIX: load every memory, not just semantically similar ones.
+    # Identity facts like name/username must always be visible regardless
+    # of what the current message happens to be about.
+    all_items = await _list_all_memories(store, namespace)
+    user_details = "\n".join(it.value["data"] for it in all_items) if all_items else ""
 
     messages = []
 
-    # prepend summary if one exists
     if state.get("summary", ""):
         messages.append(
             SystemMessage(content=f"Conversation summary so far:\n{state['summary']}")
@@ -197,26 +191,22 @@ async def chat_node(state: ChatState, config: RunnableConfig, store: BaseStore):
 async def summarize_conversation(state: ChatState):
     """Summarise older messages to keep context window manageable."""
     existing_summary = state.get("summary", "")
-    if existing_summary:
-        prompt = (
-            f"Existing summary:\n{existing_summary}\n\n"
-            "Extend the summary using the new conversation above."
-        )
-    else:
-        prompt = "Summarize the conversation above."
-
-    message_for_summary = state["messages"] + [HumanMessage(content=prompt)]
+    summary_prompt = (
+        f"Existing summary:\n{existing_summary}\n\nExtend the summary using the new conversation above."
+        if existing_summary
+        else "Summarize the conversation above."
+    )
+    message_for_summary = state["messages"] + [HumanMessage(content=summary_prompt)]
     response = await model.ainvoke(message_for_summary)
     return {"summary": response.content}
 
 
 # ──────────────────────────────────────────
-# Conditional edge
+# Conditional edge (must be sync)
 # ──────────────────────────────────────────
 
-async def should_summarize(state: ChatState):
-    """Summarise every 6 messages, not on every turn after 6."""
-    return len(state["messages"]) % 6 == 0
+def should_summarize(state: ChatState) -> str:
+    return "summarize" if len(state["messages"]) % 6 == 0 else END
 
 
 # ──────────────────────────────────────────
@@ -233,8 +223,8 @@ builder.add_edge("remember", "chat")
 builder.add_conditional_edges(
     "chat",
     should_summarize,
-    {True: "summarize", False: END},
+    {"summarize": "summarize", END: END},
 )
 builder.add_edge("summarize", END)
 
-graph = builder.compile(checkpointer=checkpointer, store=store)
+uncompiled_builder = builder
