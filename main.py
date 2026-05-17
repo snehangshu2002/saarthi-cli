@@ -9,7 +9,9 @@ from rich.markdown import Markdown
 from rich.rule import Rule
 from rich.live import Live
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.shortcuts import radiolist_dialog, input_dialog, message_dialog
 from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -35,6 +37,46 @@ COMMANDS = {
     "/help":     "Show available commands",
     "/settings": "Show current settings",
 }
+
+
+class SlashCommandCompleter(Completer):
+    """Show slash commands only while typing a command at the prompt."""
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/") or " " in text:
+            return
+
+        for command, description in COMMANDS.items():
+            if command.startswith(text):
+                yield Completion(
+                    command,
+                    start_position=-len(text),
+                    display=command,
+                    display_meta=description,
+                )
+
+
+def build_key_bindings() -> KeyBindings:
+    bindings = KeyBindings()
+
+    @bindings.add("enter")
+    def _(event):
+        buffer = event.app.current_buffer
+        if buffer.complete_state and buffer.complete_state.current_completion:
+            buffer.apply_completion(buffer.complete_state.current_completion)
+        buffer.validate_and_handle()
+
+    return bindings
+
+
+def create_chat_session() -> PromptSession:
+    return PromptSession(
+        history=InMemoryHistory(),
+        completer=SlashCommandCompleter(),
+        complete_while_typing=True,
+        key_bindings=build_key_bindings(),
+    )
 
 # ──────────────────────────────────────────
 # Settings helpers
@@ -216,7 +258,7 @@ async def stream_response(graph, user_input: str, config: dict) -> str:
 
 async def run():
     os.makedirs(DATA_DIR, exist_ok=True)
-    session = PromptSession(history=InMemoryHistory())
+    session = create_chat_session()
 
     console.print(Rule("[bold cyan]Chatbot[/]"))
 
@@ -291,7 +333,7 @@ async def run():
 
                 elif user_input == "/new":
                     config = start_new_conversation()
-                    session = PromptSession(history=InMemoryHistory())
+                    session = create_chat_session()
                     console.clear()
                     console.print(Rule("[bold cyan]Chatbot[/]"))
                     console.print("[dim]New conversation started.[/]\n")
