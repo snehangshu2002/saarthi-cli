@@ -24,10 +24,8 @@ SETTINGS_FILE = "settings.json"
 DATA_DIR      = "data"
 
 STATUS_MESSAGES = [
-    "Thinking...", "Planning...", "Searching memory...",
-    "Reasoning...", "Analyzing context...", "Writing response...",
-    "Connecting ideas...", "Checking memories...", "Processing...",
-    "Building answer...",
+    "Thinking...", "Planning...","Reasoning...", "Analyzing context...", 
+    "Writing response...","Connecting ideas...", "Processing...","Building answer...",
 ]
 
 COMMANDS = {
@@ -253,9 +251,12 @@ async def run():
             graph = build_graph(model, checkpointer, store)
             await seed_username(store, user_id)
 
+            def start_new_conversation() -> dict:
+                new_thread_id = str(uuid.uuid4())
+                return {"configurable": {"user_id": user_id, "thread_id": new_thread_id}}
+
             # always start fresh on launch
-            thread_id = str(uuid.uuid4())
-            config    = {"configurable": {"user_id": user_id, "thread_id": thread_id}}
+            config = start_new_conversation()
             console.print(f"\n[dim]New session started. Type /help for commands.[/]\n")
 
             # ── chat loop ──
@@ -289,8 +290,10 @@ async def run():
                     console.print()
 
                 elif user_input == "/new":
-                    thread_id = str(uuid.uuid4())
-                    config["configurable"]["thread_id"] = thread_id
+                    config = start_new_conversation()
+                    session = PromptSession(history=InMemoryHistory())
+                    console.clear()
+                    console.print(Rule("[bold cyan]Chatbot[/]"))
                     console.print("[dim]New conversation started.[/]\n")
 
                 # elif user_input == "/memory":
