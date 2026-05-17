@@ -1,0 +1,9 @@
+.env
+data
+temp.ipynb
+*.ipynb
+*.pyc
+*.pyo
+*__pycache__
+*.venv
+*.env
