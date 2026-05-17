@@ -80,9 +80,9 @@ class ChatState(MessagesState):
 # Helpers
 # ──────────────────────────────────────────
 
-async def _get_all_memories(store: BaseStore,query: str,namespace: tuple) -> list:
+async def _get_all_memories(store: BaseStore, query: str, namespace: tuple) -> list:
     """asearch(query=None) returns all items — alist() does not exist."""
-    return await store.asearch(namespace, query, limit=500)
+    return await store.asearch(namespace, query=query, limit=500)
 
 
 def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -110,6 +110,17 @@ def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     return clean
 
 
+def _latest_human_content(messages: list[BaseMessage]) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            return str(msg.content)
+        if getattr(msg, "type", "") == "human":
+            return str(getattr(msg, "content", ""))
+        if isinstance(msg, dict) and msg.get("role") in {"human", "user"}:
+            return str(msg.get("content", ""))
+    return ""
+
+
 # ──────────────────────────────────────────
 # Build graph — called once from main.py
 # ──────────────────────────────────────────
@@ -128,9 +139,12 @@ def build_graph(model, checkpointer, store):
         """Extract facts from the latest user message and persist them."""
         user_id = config["configurable"]["user_id"]
         namespace = ("user", user_id, "details")
-        last_message = state["messages"][-1].content
-        query=last_message+". Are there any similar memories that should be updated or deleted?"
-        all_items = await _get_all_memories(store,query, namespace)
+        last_message = _latest_human_content(state["messages"])
+        if not last_message:
+            return {}
+
+        query = last_message + ". Are there any similar memories that should be updated or deleted?"
+        all_items = await _get_all_memories(store, query, namespace)
         existing = (
             "\n".join(f"[{it.key}] {it.value.get('data', '')}" for it in all_items)
             if all_items else "(empty)"
@@ -159,9 +173,9 @@ def build_graph(model, checkpointer, store):
         """Retrieve all memories, sanitize history, stream response."""
         user_id = config["configurable"]["user_id"]
         namespace = ("user", user_id, "details")
-        last_message = state["messages"][-1].content
-        query=last_message+". Are there any similar memories that should be updated or deleted?"
-        all_items = await _get_all_memories(store,query, namespace)
+        last_message = _latest_human_content(state["messages"])
+        query = last_message + ". Are there any similar memories that should be updated or deleted?"
+        all_items = await _get_all_memories(store, query, namespace)
         user_details = "\n".join(it.value["data"] for it in all_items) if all_items else ""
 
         messages = []
@@ -215,8 +229,8 @@ def build_graph(model, checkpointer, store):
 
     # ── conditional edge ───────────────────
 
-    def should_summarize(state: ChatState) -> str:
-        return "summarize" if len(state["messages"]) % 6 == 0 else END
+    def route_after_chat(state: ChatState) -> str:
+        return "summarize" if len(state["messages"]) % 6 == 0 else "remember"
 
     # ── compile ────────────────────────────
 
@@ -225,13 +239,13 @@ def build_graph(model, checkpointer, store):
     builder.add_node("chat", chat_node)
     builder.add_node("summarize", summarize_conversation)
 
-    builder.add_edge(START, "remember")
-    builder.add_edge("remember", "chat")
+    builder.add_edge(START, "chat")
     builder.add_conditional_edges(
         "chat",
-        should_summarize,
-        {"summarize": "summarize", END: END},
+        route_after_chat,
+        {"summarize": "summarize", "remember": "remember"},
     )
-    builder.add_edge("summarize", END)
+    builder.add_edge("summarize", "remember")
+    builder.add_edge("remember", END)
 
     return builder.compile(checkpointer=checkpointer, store=store)
