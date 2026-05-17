@@ -102,7 +102,7 @@ memory_extractor = model.with_structured_output(MemoryDecision)
 # Helpers
 # ──────────────────────────────────────────
 
-async def _list_all_memories(store: BaseStore, namespace: tuple) -> list:
+async def _list_all_memories(store: BaseStore,query, namespace: tuple) -> list:
     """
     Fetch every memory for this user without any score filter.
     list() returns all items; we fall back to a broad asearch if list() is unavailable.
@@ -112,7 +112,7 @@ async def _list_all_memories(store: BaseStore, namespace: tuple) -> list:
         items = await store.alist(namespace)
     except AttributeError:
         # Fallback: search with a very generic query and no score cutoff
-        items = await store.asearch(namespace, query="user profile preferences", limit=100)
+        items = await store.asearch(namespace, query=query, limit=100)
     return list(items)
 
 
@@ -128,7 +128,7 @@ async def remember_node(state: ChatState, config: RunnableConfig, store: BaseSto
 
     # FIX: fetch ALL existing memories (no score filter) so the extractor
     # has complete context and update/delete keys are always resolvable.
-    all_items = await _list_all_memories(store, namespace)
+    all_items = await _list_all_memories(store,last_message, namespace)
     existing = (
         "\n".join(f"[{it.key}] {it.value.get('data', '')}" for it in all_items)
         if all_items
@@ -161,11 +161,9 @@ async def chat_node(state: ChatState, config: RunnableConfig, store: BaseStore):
     """Retrieve ALL memories and call the model."""
     user_id = config["configurable"]["user_id"]
     namespace = ("user", user_id, "details")
+    last_message = state["messages"][-1].content
 
-    # FIX: load every memory, not just semantically similar ones.
-    # Identity facts like name/username must always be visible regardless
-    # of what the current message happens to be about.
-    all_items = await _list_all_memories(store, namespace)
+    all_items = await _list_all_memories(store,last_message, namespace)
     user_details = "\n".join(it.value["data"] for it in all_items) if all_items else ""
 
     messages = []
