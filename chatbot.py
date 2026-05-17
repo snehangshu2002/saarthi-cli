@@ -10,8 +10,8 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.store.base import BaseStore
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, Field
-from langgraph.store.sqlite import SqliteStore
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.store.sqlite import AsyncSqliteStore
+from langgraph.checkpoint.sqlite import AsyncSqliteSaver
 import os
 import sqlite3
 
@@ -31,13 +31,13 @@ embedding_model = MistralAIEmbeddings()
 os.makedirs("data", exist_ok=True)
 
 # Separate connection for checkpoints
-checkpoint_conn = sqlite3.connect(
+checkpoint_conn = AsyncSqliteSaver.connect(
     "data/checkpoints.db",
     check_same_thread=False
 )
 
 # Separate connection for store
-store_conn = sqlite3.connect(
+store_conn = AsyncSqliteStore.connect(
     "data/memory.db",
     check_same_thread=False
 )
@@ -126,13 +126,13 @@ memory_extractor = model.with_structured_output(MemoryDecision)
 # Nodes
 # ──────────────────────────────────────────
 
-def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
+async def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
     """Extract facts from the latest user message and persist them to the store."""
     user_id = config["configurable"]["user_id"]
     namespace = ("user", user_id, "details")
     last_message = state["messages"][-1].content
 
-    items = store.search(namespace, query=last_message, limit=5)
+    items:list[Document] = await store.search(namespace, query=last_message, limit=5)
     filtered = [it for it in items if it.score > 0.70]
     existing = (
         "\n".join(f"[{it.key}] {it.value.get('data', '')}" for it in filtered)
@@ -140,7 +140,7 @@ def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
         else "(empty)"
     )
 
-    decision: MemoryDecision = memory_extractor.invoke([
+    decision: MemoryDecision = await memory_extractor.ainvoke([
         SystemMessage(content=MEMORY_PROMPT.format(user_details_content=existing)),
         {"role": "user", "content": last_message},
     ])
@@ -150,26 +150,26 @@ def remember_node(state: ChatState, config: RunnableConfig, store: BaseStore):
             if not mem.is_new and mem.action == "add":
                 continue
             if mem.action == "add":
-                store.put(namespace, str(uuid.uuid4()), {"data": mem.text})
+                await store.put(namespace, str(uuid.uuid4()), {"data": mem.text})
             elif mem.action in ("update", "delete"):
                 for item in items:
                     if item.key == mem.replaces:
                         if mem.action == "update":
-                            store.put(namespace, item.key, {"data": mem.text})
+                            await store.put(namespace, item.key, {"data": mem.text})
                         elif mem.action == "delete":
-                            store.delete(namespace, item.key)
+                            await store.delete(namespace, item.key)
                         break
 
     return {}
 
 
-def chat_node(state: ChatState, config: RunnableConfig, store: BaseStore):
+async def chat_node(state: ChatState, config: RunnableConfig, store: BaseStore):
     """Build the full message list and call the model."""
     user_id = config["configurable"]["user_id"]
     namespace = ("user", user_id, "details")
     last_message = state["messages"][-1].content
 
-    items = store.search(namespace, query=last_message, limit=5)
+    items:list[Document] = await store.search(namespace, query=last_message, limit=5)
     filtered = [it for it in items if it.score > 0.70]
     user_details = "\n".join(it.value["data"] for it in filtered) if filtered else ""
 
@@ -190,11 +190,11 @@ def chat_node(state: ChatState, config: RunnableConfig, store: BaseStore):
     )
     messages.extend(state["messages"])
 
-    response = model.invoke(messages)
+    response = await model.ainvoke(messages)
     return {"messages": [response]}
 
 
-def summarize_conversation(state: ChatState):
+async def summarize_conversation(state: ChatState):
     """Summarise older messages to keep context window manageable."""
     existing_summary = state.get("summary", "")
     if existing_summary:
@@ -206,7 +206,7 @@ def summarize_conversation(state: ChatState):
         prompt = "Summarize the conversation above."
 
     message_for_summary = state["messages"] + [HumanMessage(content=prompt)]
-    response = model.invoke(message_for_summary)
+    response = await model.ainvoke(message_for_summary)
     return {"summary": response.content}
 
 
@@ -214,7 +214,7 @@ def summarize_conversation(state: ChatState):
 # Conditional edge
 # ──────────────────────────────────────────
 
-def should_summarize(state: ChatState):
+async def should_summarize(state: ChatState):
     """Summarise every 6 messages, not on every turn after 6."""
     return len(state["messages"]) % 6 == 0
 
