@@ -10,15 +10,22 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
+    "arxiv>=4.0.0",
+    "ddgs>=9.14.4",
     "dotenv>=0.9.9",
     "langchain>=1.2.18",
+    "langchain-community>=0.4.1",
+    "langchain-mcp-adapters>=0.2.2",
     "langchain-mistralai>=1.1.4",
+    "langchain-tavily>=0.2.18",
     "langgraph>=1.1.10",
     "langgraph-checkpoint-sqlite>=3.1.0",
+    "mcp>=1.27.1",
     "prompt-toolkit>=3.0.52",
     "pyfiglet>=1.0.4",
     "rich>=15.0.0",
     "typing>=3.10.0.0",
+    "wikipedia>=1.4.0",
 ]
 
 [project.scripts]
