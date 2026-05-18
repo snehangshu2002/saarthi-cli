@@ -2,9 +2,11 @@ import asyncio
 import os
 import random
 import uuid
+import json
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.sqlite.aio import AsyncSqliteStore
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from rich.console import Console
 from rich.rule import Rule
 
@@ -72,6 +74,7 @@ async def run():
             ui.append_block("New session started. Type /help for commands.")
             if created:
                 ui.append_block("mcp_config.json created at project root. Edit it to add MCP servers.")
+            
             async def chat_loop():
                 nonlocal config
                 resume_options = None
@@ -116,9 +119,34 @@ async def run():
                         ui.clear_transcript()
                         if snapshot is not None:
                             messages = snapshot.checkpoint.get("channel_values", {}).get("messages", [])
-                            transcript = render_messages(messages)
-                            if transcript:
-                                ui.append_block(transcript)
+                            
+                            # REBUILD HISTORY USING INTERACTIVE UI COMPONENTS
+                            tool_args_map = {}
+                            for msg in messages:
+                                if isinstance(msg, HumanMessage):
+                                    ui.append_block(f"> {msg.content}")
+                                elif isinstance(msg, AIMessage):
+                                    for tc in getattr(msg, "tool_calls", []):
+                                        tool_args_map[tc["id"]] = tc["args"]
+                                    if msg.content:
+                                        ui.start_bot_message()
+                                        ui.finish_bot_message(str(msg.content))
+                                elif isinstance(msg, ToolMessage):
+                                    name = getattr(msg, "name", "tool")
+                                    tid = getattr(msg, "tool_call_id", "")
+                                    args = tool_args_map.get(tid, {})
+                                    
+                                    header = ""
+                                    if args:
+                                        try:
+                                            s = json.dumps(args, ensure_ascii=False)
+                                            header = f"({s if len(s)<=80 else s[:80]+'…'})"
+                                        except Exception:
+                                            pass
+                                            
+                                    full_output = f"{name}{header}\n{msg.content}"
+                                    ui.append_tool_block(name, full_output, in_flight=False)
+                                    
                         ui.append_block(
                             "Resumed session: "
                             + format_checkpoint_time(selected["ts"])
