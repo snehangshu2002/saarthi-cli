@@ -17,7 +17,7 @@ from chatbot_cli.sessions import list_user_sessions, load_thread_snapshot
 from chatbot_cli.settings import first_run_setup, load_settings, settings_complete
 from chatbot_cli.streaming import stream_response
 from chatbot_cli.ui import ChatUI, create_chat_session
-
+from chatbot_cli.settings import ensure_mcp_config
 console = Console()
 
 
@@ -29,7 +29,7 @@ def start_new_conversation(user_id: str) -> dict:
 async def run():
     os.makedirs(DATA_DIR, exist_ok=True)
     session = create_chat_session()
-
+    created = ensure_mcp_config()
     console.print(Rule("[bold cyan]Chatbot[/]"))
 
     settings = load_settings()
@@ -63,7 +63,8 @@ async def run():
             config = start_new_conversation(user_id)
             ui.append_block("Welcome back, " + settings["username"] + "!")
             ui.append_block("New session started. Type /help for commands.")
-
+            if created:
+                ui.append_block("mcp_config.json created at project root. Edit it to add MCP servers.")
             async def chat_loop():
                 nonlocal config
                 resume_options = None
