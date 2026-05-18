@@ -23,6 +23,14 @@ If the user's name or relevant personal context is available, always personalize
 Avoid generic phrasing when personalization is possible.
 Always ensure that personalization is based only on known user details and not assumed.
 In the end suggest 3 relevant further questions based on the current response and user profile.
+When the user asks about:
+- git
+- filesystem
+- shell commands
+- code execution
+- terminal operations
+
+ALWAYS use available tools instead of explaining theoretically.
 The user's memory (which may be empty) is provided as: {user_details_content}
 """
 
@@ -74,6 +82,7 @@ class MemoryDecision(BaseModel):
 
 class ChatState(MessagesState):
     summary: str
+    pending_tool_calls: list  # tool call dicts waiting to be executed
 
 
 # ──────────────────────────────────────────
@@ -87,26 +96,40 @@ async def _get_all_memories(store: BaseStore, query: str, namespace: tuple) -> l
 
 def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     """
-    Remove or fix messages that would cause a 400 from Mistral/OpenAI.
-    Specifically:
-    - AIMessage / AIMessageChunk with content=None or content=""
-    These get stored in checkpoints from previous streaming sessions
-    and cause 'Assistant message must have content' errors on replay.
+    Remove or fix messages that would cause a 400 from Mistral.
+
+    Rules:
+    1. AIMessage with empty content AND no tool_calls -> drop (leftover streaming artifact).
+    2. AIMessage with empty content BUT has tool_calls -> KEEP (required anchor for ToolMessages).
+    3. ToolMessage whose preceding non-tool message is not an AIMessage with tool_calls -> drop
+       (orphaned tool result; sending it confuses Mistral with wrong role order).
     """
-    clean = []
+    # Pass 1: drop truly empty AIMessages that carry no tool calls
+    pass1 = []
     for msg in messages:
         if isinstance(msg, AIMessage):
-            # skip assistant messages with empty/None content
+            has_tool_calls = bool(getattr(msg, "tool_calls", None))
             content = msg.content
-            if not content:
-                continue
-            # if content is a list (tool use format), keep as-is
-            if isinstance(content, list):
-                clean.append(msg)
-            else:
-                clean.append(msg)
-        else:
-            clean.append(msg)
+            is_empty = not content or content == ""
+            if is_empty and not has_tool_calls:
+                continue  # pure streaming artifact, safe to drop
+        pass1.append(msg)
+
+    # Pass 2: drop ToolMessages that are now orphaned (no AIMessage(tool_calls) before them)
+    clean = []
+    for msg in pass1:
+        if isinstance(msg, ToolMessage):
+            preceding = next(
+                (m for m in reversed(clean) if not isinstance(m, ToolMessage)),
+                None,
+            )
+            if not (
+                isinstance(preceding, AIMessage)
+                and bool(getattr(preceding, "tool_calls", None))
+            ):
+                continue  # orphaned -- skip to avoid role-order error
+        clean.append(msg)
+
     return clean
 
 
@@ -173,7 +196,7 @@ def build_graph(model, checkpointer, store, tools=None):
         return {}
 
     async def chat_node(state: ChatState, config: RunnableConfig, store: BaseStore):
-        """Retrieve all memories, sanitize history, stream response."""
+        """Retrieve memories, sanitize history, call model once."""
         user_id = config["configurable"]["user_id"]
         namespace = ("user", user_id, "details")
         last_message = _latest_human_content(state["messages"])
@@ -196,36 +219,83 @@ def build_graph(model, checkpointer, store, tools=None):
             )
         )
 
-        # sanitize before sending — strips empty AIMessages from checkpointed history
         messages.extend(_sanitize_messages(state["messages"]))
 
-        # invoke model (with tools bound if any)
         response = await model_with_tools.ainvoke(messages)
 
-        # tool execution loop — keeps going until model stops calling tools
-        while response.tool_calls:
-            tool_messages = []
-            for tc in response.tool_calls:
-                t = tool_map.get(tc["name"])
-                if t is None:
-                    result = f"ERROR: unknown tool '{tc['name']}'"
-                else:
-                    try:
-                        if hasattr(t, "ainvoke"):
-                            result = await t.ainvoke(tc["args"])
-                        else:
-                            result = t.invoke(tc["args"])
-                    except Exception as e:
-                        result = f"ERROR: {e}"
-                tool_messages.append(
-                    ToolMessage(content=str(result), tool_call_id=tc["id"])
-                )
-            # append assistant tool-call message + results, then call model again
-            messages = messages + [response] + tool_messages
-            response = await model_with_tools.ainvoke(messages)
+        if response.tool_calls:
+            # Park the assistant message + pending calls; route to tools_node
+            return {
+                "messages": [response],
+                "pending_tool_calls": response.tool_calls,
+            }
 
         final_message = AIMessage(content=response.content or "(no response)")
-        return {"messages": [final_message]}
+        return {"messages": [final_message], "pending_tool_calls": []}
+
+    async def tools_node(state: ChatState, config: RunnableConfig, store: BaseStore):
+        """Execute all pending tool calls and return ToolMessages."""
+        pending = state.get("pending_tool_calls", [])
+        if not pending:
+            return {"pending_tool_calls": []}
+
+        tool_messages = []
+        for tc in pending:
+            t = tool_map.get(tc["name"])
+            if t is None:
+                result = f"ERROR: unknown tool '{tc['name']}'"
+            else:
+                try:
+                    if hasattr(t, "ainvoke"):
+                        result = await t.ainvoke(tc["args"])
+                    else:
+                        result = t.invoke(tc["args"])
+                except Exception as e:
+                    result = f"ERROR: {e}"
+            tool_messages.append(
+                ToolMessage(
+                    content=str(result),
+                    tool_call_id=tc["id"],
+                    name=tc["name"],
+                )
+            )
+
+        return {"messages": tool_messages, "pending_tool_calls": []}
+
+    async def tool_followup_node(state: ChatState, config: RunnableConfig, store: BaseStore):
+        """After tools execute, call model again with tool results in context."""
+        user_id = config["configurable"]["user_id"]
+        namespace = ("user", user_id, "details")
+        last_message = _latest_human_content(state["messages"])
+        query = last_message + ". Are there any similar memories?"
+        all_items = await _get_all_memories(store, query, namespace)
+        user_details = "\n".join(it.value["data"] for it in all_items) if all_items else ""
+
+        messages = []
+        if state.get("summary", ""):
+            messages.append(
+                SystemMessage(content=f"Conversation summary so far:\n{state['summary']}")
+            )
+        messages.append(
+            SystemMessage(
+                content=SYSTEM_PROMPT_TEMPLATE.format(
+                    user_details_content=user_details or "(empty)"
+                )
+            )
+        )
+        messages.extend(_sanitize_messages(state["messages"]))
+
+        response = await model_with_tools.ainvoke(messages)
+
+        if response.tool_calls:
+            # Model wants more tools — loop back
+            return {
+                "messages": [response],
+                "pending_tool_calls": response.tool_calls,
+            }
+
+        final_message = AIMessage(content=response.content or "(no response)")
+        return {"messages": [final_message], "pending_tool_calls": []}
 
     async def summarize_conversation(state: ChatState):
         """Summarise older messages to keep context window manageable."""
@@ -241,9 +311,19 @@ def build_graph(model, checkpointer, store, tools=None):
         response = await model.ainvoke(message_for_summary)
         return {"summary": response.content}
 
-    # ── conditional edge ───────────────────
+    # ── conditional edges ───────────────────
 
     def route_after_chat(state: ChatState) -> str:
+        if state.get("pending_tool_calls"):
+            return "tools"
+        return "summarize" if len(state["messages"]) % 6 == 0 else "remember"
+
+    def route_after_tools(state: ChatState) -> str:
+        return "tool_followup"
+
+    def route_after_followup(state: ChatState) -> str:
+        if state.get("pending_tool_calls"):
+            return "tools"  # model wants more tools — loop
         return "summarize" if len(state["messages"]) % 6 == 0 else "remember"
 
     # ── compile ────────────────────────────
@@ -251,13 +331,21 @@ def build_graph(model, checkpointer, store, tools=None):
     builder = StateGraph(ChatState)
     builder.add_node("remember", remember_node)
     builder.add_node("chat", chat_node)
+    builder.add_node("tools", tools_node)
+    builder.add_node("tool_followup", tool_followup_node)
     builder.add_node("summarize", summarize_conversation)
 
     builder.add_edge(START, "chat")
     builder.add_conditional_edges(
         "chat",
         route_after_chat,
-        {"summarize": "summarize", "remember": "remember"},
+        {"tools": "tools", "summarize": "summarize", "remember": "remember"},
+    )
+    builder.add_edge("tools", "tool_followup")
+    builder.add_conditional_edges(
+        "tool_followup",
+        route_after_followup,
+        {"tools": "tools", "summarize": "summarize", "remember": "remember"},
     )
     builder.add_edge("summarize", "remember")
     builder.add_edge("remember", END)
