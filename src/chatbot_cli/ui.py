@@ -1,32 +1,31 @@
 import asyncio
 import time
 
-from prompt_toolkit import PromptSession #Session management.
-from prompt_toolkit.application import Application #Application management.
-from prompt_toolkit.clipboard import ClipboardData #Used for copy-paste support.
-from prompt_toolkit.completion import Completer, Completion #Used for autocomplete. e.g /he<TAB> >/help
-from prompt_toolkit.document import Document #Document management.
-from prompt_toolkit.history import InMemoryHistory #History management.
-from prompt_toolkit.key_binding import KeyBindings #Custom keyboard shortcuts.
-from prompt_toolkit.keys import Keys #Special keyboard keys.
-from prompt_toolkit.layout import HSplit, Layout, Window #Used to design UI layout.
-from prompt_toolkit.layout.containers import Float, FloatContainer #Floating popup menus used for autocomplete dropdown.
-from prompt_toolkit.layout.controls import FormattedTextControl #Used to display formatted text.
-from prompt_toolkit.layout.menus import CompletionsMenu #Autocomplete popup UI.
-from prompt_toolkit.layout.processors import Processor, Transformation #Used to process and transform text.
+from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout.containers import Float, FloatContainer
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.layout.processors import Processor, Transformation
 from prompt_toolkit.mouse_events import MouseEventType
-from prompt_toolkit.widgets import TextArea #Used to display text.
+from prompt_toolkit.widgets import TextArea
 
 from chatbot_cli.app_config import APP_STYLE, COMMANDS
-from chatbot_cli.clipboard import WindowsClipboard #Used for copy-paste support.
-from chatbot_cli.formatting import format_ai_output #Used to format AI output.
+from chatbot_cli.clipboard import WindowsClipboard
+from chatbot_cli.formatting import format_ai_output
 
 
 class SlashCommandCompleter(Completer):
     """Show slash commands only while typing a command at the prompt."""
 
     def get_completions(self, document, complete_event):
-        text = document.text_before_cursor #Gets current input before cursor e.g. /he
+        text = document.text_before_cursor
         if not text.startswith("/") or " " in text:
             return
 
@@ -84,8 +83,13 @@ class ChatUI:
     def __init__(self):
         self._history = InMemoryHistory()
         self._transcript_text = ""
+        
+        # Ordered list of all transcript elements to completely prevent text corruption
+        self._chunks = []  
+        self._tool_blocks = []   
+        self._tool_expanded = set()  
+        
         self._pending_input = None
-        self._stream_anchor = None
         self._status = ""
         self._base_status = ""
         self._spinner_index = 0
@@ -96,19 +100,23 @@ class ChatUI:
         self._selection_title = ""
         self._selection_instruction = ""
         self._ctrl_c_armed_until = 0.0
+        self._auto_scroll = True
 
         self.transcript = TextArea(
             text="",
             read_only=True,
-            focusable=True,
-            focus_on_click=False,
+            focusable=False,
+            focus_on_click=False,  
             scrollbar=True,
             wrap_lines=True,
             style="class:transcript",
             input_processors=[UserLineHighlighter()],
         )
+        
+        # ADDED BACK: Wire up the mouse handler for scrolling
         self._transcript_mouse_handler = self.transcript.control.mouse_handler
         self.transcript.control.mouse_handler = self._handle_transcript_mouse_event
+        
         self.input = TextArea(
             prompt="> ",
             multiline=False,
@@ -122,11 +130,9 @@ class ChatUI:
         body = HSplit(
             [
                 self.transcript,
-                Window(
-                    height=1,
-                    content=FormattedTextControl(self._get_status_bar_text),
-                ),
+                Window(height=1, char="─", style="fg:#444444"), 
                 self.input,
+                Window(height=1, content=FormattedTextControl(self._get_status_bar_text)), 
             ]
         )
 
@@ -144,7 +150,8 @@ class ChatUI:
         self.app = Application(
             layout=Layout(layout, focused_element=self.input),
             full_screen=True,
-            mouse_support=True,
+            # ENABLED MOUSE SUPPORT: Required for scroll wheel. Use Shift+Drag to copy!
+            mouse_support=True, 
             style=APP_STYLE,
             key_bindings=self._build_key_bindings(),
             clipboard=WindowsClipboard(),
@@ -155,6 +162,8 @@ class ChatUI:
 
         @bindings.add("enter")
         def _(event):
+            self._auto_scroll = True 
+            
             buffer = self.input.buffer
             if buffer.complete_state and buffer.complete_state.current_completion:
                 buffer.apply_completion(buffer.complete_state.current_completion)
@@ -177,7 +186,7 @@ class ChatUI:
         def _(event):
             if self.app.layout.has_focus(self.input):
                 self.app.layout.focus(self.transcript)
-                self.set_status("Transcript focus. Mouse wheel/PageUp/PageDown scroll, Ctrl+A copies all, Tab returns.")
+                self.set_status("Transcript focused. Scroll with arrows/PgUp/PgDn. Tab returns.")
             else:
                 self.app.layout.focus(self.input)
                 self.set_status("")
@@ -221,33 +230,16 @@ class ChatUI:
         def _(event):
             self._scroll_transcript(self._page_scroll_count())
 
-        @bindings.add("escape", "up")
-        def _(event):
-            self._scroll_transcript(-3)
-
-        @bindings.add("escape", "down")
-        def _(event):
-            self._scroll_transcript(3)
-
-        @bindings.add(Keys.ScrollUp)
-        def _(event):
-            self._scroll_transcript(-3)
-
-        @bindings.add(Keys.ScrollDown)
-        def _(event):
-            self._scroll_transcript(3)
-
         @bindings.add("home")
         def _(event):
+            self._auto_scroll = False
             self.transcript.buffer.cursor_position = 0
             self.app.invalidate()
 
         @bindings.add("end")
         def _(event):
-            self.transcript.buffer.cursor_position = len(
-                self.transcript.buffer.text
-            )
-            self.app.invalidate()
+            self._auto_scroll = True
+            self._render_transcript()
 
         @bindings.add("escape")
         def _(event):
@@ -256,39 +248,8 @@ class ChatUI:
                 if self._pending_input is not None and not self._pending_input.done():
                     self._pending_input.set_result("__cancel_select__")
 
-        @bindings.add("c-v")
-        def _(event):
-            if not self.app.layout.has_focus(self.input):
-                self.app.layout.focus(self.input)
-            data = event.app.clipboard.get_data()
-            if data.text:
-                self.input.buffer.insert_text(data.text)
-
         @bindings.add("c-c")
         def _(event):
-            buffer = event.app.current_buffer
-
-            # Copy selected text
-            if buffer.selection_state:
-                copied = buffer.copy_selection()
-                event.app.clipboard.set_data(copied)
-
-                if self.app.layout.has_focus(self.transcript):
-                    self.set_status("Transcript selection copied.")
-
-                    # Clear selection
-                    buffer.exit_selection()
-
-                    # Return focus to input automatical ly
-                    self.app.layout.focus(self.input)
-
-                    # Put cursor at end of input
-                    self.input.buffer.cursor_position = len(
-                        self.input.buffer.text
-                    )
-
-                self.app.invalidate()
-                return
             now = time.monotonic()
             if now < self._ctrl_c_armed_until:
                 if self._pending_input is not None and not self._pending_input.done():
@@ -298,25 +259,18 @@ class ChatUI:
             self._status = [("fg:#aaaaaa", "Press Ctrl-C again to exit")]
             self.app.invalidate()
 
-        @bindings.add("c-space")
+        @bindings.add("c-t")
         def _(event):
-            if self.app.layout.has_focus(self.transcript):
-                buffer = self.transcript.buffer
-                if buffer.selection_state:
-                    buffer.exit_selection()
-                    self.set_status("Transcript selection cleared.")
-                else:
-                    buffer.start_selection()
-                    self.set_status("Transcript selection started. Move with arrows, Ctrl+C copies.")
-
-        @bindings.add("c-a")
-        def _(event):
-            if self.app.layout.has_focus(self.transcript):
-                buffer = self.transcript.buffer
-                event.app.clipboard.set_data(ClipboardData(buffer.text))
-                self.set_status("Transcript copied to clipboard.")
+            if not self._tool_blocks:
                 return
-            event.app.current_buffer.cursor_position = 0
+            last_idx = len(self._tool_blocks) - 1
+            if last_idx in self._tool_expanded:
+                self._tool_expanded.discard(last_idx)
+                self.set_status("Tool output collapsed.")
+            else:
+                self._tool_expanded.add(last_idx)
+                self.set_status("Tool output expanded. Ctrl+T to collapse.")
+            self._rebuild_transcript()
 
         @bindings.add("c-q")
         @bindings.add("c-d")
@@ -330,7 +284,12 @@ class ChatUI:
         if isinstance(self._status, list):
             return self._status
         spinner = ["|", "/", "-", "\\"][self._spinner_index % 4] if self._spinner_active else ""
-        return [("class:status", f" {spinner} {self._status}" if self._status else "")]
+        if self._status:
+            return [
+                ("fg:#ffaa00 bold", f" {spinner} \u25b6\u25b6 " if spinner else " \u25b6\u25b6 "),
+                ("class:status", self._status)
+            ]
+        return [("class:status", "")]
 
     def _page_scroll_count(self) -> int:
         info = self.transcript.window.render_info
@@ -339,25 +298,23 @@ class ChatUI:
         return max(1, info.window_height - 2)
 
     def _scroll_transcript(self, amount: int):
-        transcript_buffer = self.transcript.buffer
+        buffer = self.transcript.buffer
+        doc = buffer.document
+        
+        if amount < 0:
+            self._auto_scroll = False
+            for _ in range(-amount):
+                buffer.cursor_position += doc.get_cursor_up_position()
+        else:
+            for _ in range(amount):
+                buffer.cursor_position += doc.get_cursor_down_position()
 
-        current_focus = self.app.layout.current_window
-
-        if amount > 0:
-            transcript_buffer.cursor_down(count=amount)
-        elif amount < 0:
-            transcript_buffer.cursor_up(count=-amount)
-
-        # Restore original focus
-        if current_focus:
-            self.app.layout.focus(current_focus)
-
-        self.set_status(
-            "Scrolling transcript. Mouse wheel/PageUp/PageDown move history."
-        )
+        if buffer.cursor_position >= len(buffer.text) - 1:
+            self._auto_scroll = True
 
         self.app.invalidate()
 
+    # ADDED BACK: Processes mouse wheel events and routes them to our smooth scrolling logic
     def _handle_transcript_mouse_event(self, mouse_event):
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
             self._scroll_transcript(-3)
@@ -365,12 +322,14 @@ class ChatUI:
         if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
             self._scroll_transcript(3)
             return None
-        return self._transcript_mouse_handler(mouse_event)
+        result = self._transcript_mouse_handler(mouse_event)
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            self.app.layout.focus(self.input)
+        return result
 
     def _selection_block(self) -> str:
         if not self._selection_options:
             return ""
-
         lines = [self._selection_title]
         for index, option in enumerate(self._selection_options):
             prefix = ">" if index == self._selection_index else " "
@@ -380,34 +339,102 @@ class ChatUI:
         return "\n".join(lines)
 
     def _render_transcript(self):
-        previous_position = self.transcript.buffer.cursor_position
-        was_at_bottom = previous_position >= len(self.transcript.buffer.text)
         text = self._transcript_text
         selection_block = self._selection_block()
+
         if selection_block:
             if text:
                 text += "\n\n"
             text += selection_block
-        if self.app.layout.has_focus(self.transcript) and not was_at_bottom:
-            cursor_position = min(previous_position, len(text))
-        else:
-            cursor_position = len(text)
-        self.transcript.buffer.set_document(
-            Document(text, cursor_position=cursor_position),
+
+        buffer = self.transcript.buffer
+        prev_cursor = buffer.cursor_position
+
+        new_cursor = len(text) if self._auto_scroll else min(prev_cursor, len(text))
+
+        buffer.set_document(
+            Document(text, cursor_position=new_cursor),
             bypass_readonly=True,
         )
         self.app.invalidate()
 
-    def append_block(self, text: str):
-        if self._transcript_text:
-            self._transcript_text += "\n"
-        self._transcript_text += text.strip("\n") + "\n"
+    def _rebuild_transcript(self):
+        text = ""
+        for chunk in self._chunks:
+            if chunk['type'] == 'text':
+                text += chunk['text'] + "\n"
+            elif chunk['type'] == 'tool':
+                idx = chunk['idx']
+                tb = self._tool_blocks[idx]
+                text += self._tool_block_text(idx, tb['name'], tb['output'], tb['in_flight'])
+            elif chunk['type'] == 'bot':
+                text += chunk['text'] + "\n"
+
+        self._transcript_text = text
         self._render_transcript()
 
+    def append_block(self, text: str):
+        self._chunks.append({'type': 'text', 'text': text.strip('\n')})
+        self._rebuild_transcript()
+
     def clear_transcript(self):
-        self._transcript_text = ""
-        self._stream_anchor = None
-        self._render_transcript()
+        self._chunks.clear()
+        self._tool_blocks.clear()
+        self._tool_expanded.clear()
+        self._auto_scroll = True
+        self._rebuild_transcript()
+
+    def start_bot_message(self):
+        self._chunks.append({'type': 'bot', 'text': '* '})
+        self._rebuild_transcript()
+
+    def update_bot_message(self, text: str):
+        if not self._chunks or self._chunks[-1]['type'] != 'bot':
+            self.start_bot_message()
+        self._chunks[-1]['text'] = '* ' + format_ai_output(text)
+        self._rebuild_transcript()
+
+    def finish_bot_message(self, text: str):
+        self.update_bot_message(text)
+
+    def append_tool_block(self, tool_name: str, full_output: str, in_flight: bool = False) -> int:
+        idx = len(self._tool_blocks)
+        self._tool_blocks.append({'name': tool_name, 'output': full_output, 'in_flight': in_flight})
+        self._chunks.append({'type': 'tool', 'idx': idx})
+        self._rebuild_transcript()
+        return idx
+
+    def update_tool_block(self, idx: int, full_output: str, in_flight: bool = True):
+        if 0 <= idx < len(self._tool_blocks):
+            self._tool_blocks[idx]['output'] = full_output
+            self._tool_blocks[idx]['in_flight'] = in_flight
+            self._rebuild_transcript()
+
+    def _tool_block_text(self, idx: int, tool_name: str, full_output: str, in_flight: bool) -> str:
+        lines = full_output.rstrip().splitlines()
+        first_line = lines[0] if lines else tool_name
+        header = f"┌ 🔧 {first_line}"
+        
+        expanded = idx in self._tool_expanded
+
+        if not in_flight and not expanded:
+            return f"\n{header}  [✓]\n└{'─' * 24}\n"
+            
+        if not in_flight and expanded:
+            body_lines = lines[1:] if len(lines) > 1 else ["  (No output)"]
+            body = "\n".join(f"  {l}" for l in body_lines)
+            hint = "\\ Tool output expanded. Ctrl+T to collapse."
+            return f"\n{header}  [✓]\n{body}\n{hint}\n"
+
+        if expanded:
+            body_lines = lines[1:] if len(lines) > 1 else ["  (Waiting for output...)"]
+            body = "\n".join(f"  {l}" for l in body_lines)
+            hint = "\\ Tool output expanded. Ctrl+T to collapse."
+        else:
+            body = "  Running..."
+            hint = "\\ Press Ctrl+T to see whole output."
+
+        return f"\n{header}\n{body}\n{hint}\n"
 
     def has_selection(self) -> bool:
         return bool(self._selection_options)
@@ -456,23 +483,6 @@ class ChatUI:
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             pass
-
-    def start_bot_message(self):
-        if self._transcript_text and not self._transcript_text.endswith("\n"):
-            self._transcript_text += "\n"
-        self._stream_anchor = len(self._transcript_text)
-        self._transcript_text += "* "
-        self._render_transcript()
-
-    def update_bot_message(self, text: str):
-        if self._stream_anchor is None:
-            self.start_bot_message()
-        self._transcript_text = self._transcript_text[: self._stream_anchor] + format_ai_output(text) + "\n"
-        self._render_transcript()
-
-    def finish_bot_message(self, text: str):
-        self.update_bot_message(text)
-        self._stream_anchor = None
 
     async def prompt(self) -> str:
         loop = asyncio.get_running_loop()
