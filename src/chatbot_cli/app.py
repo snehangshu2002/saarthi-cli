@@ -24,6 +24,27 @@ from chatbot_cli.tool import build_tools
 console = Console()
 
 
+SAARTHI_LOGO = """
+███████╗ █████╗  █████╗ ██████╗ ████████╗██╗  ██╗██╗
+██╔════╝██╔══██╗██╔══██╗██╔══██╗╚══██╔══╝██║  ██║██║
+███████╗███████║███████║██████╔╝   ██║   ███████║██║
+╚════██║██╔══██║██╔══██║██╔══██╗   ██║   ██╔══██║██║
+███████║██║  ██║██║  ██║██║  ██║   ██║   ██║  ██║██║
+╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝
+"""
+
+def get_gradient_logo():
+    """Maps the logo lines to the invisible gradient markers defined in ui.py"""
+    markers = ["\u200c", "\u200d", "\u200e", "\u200f", "\u202a", "\u202b"]
+    lines = SAARTHI_LOGO.strip("\n").split("\n")
+    styled_lines = []
+    
+    for i, line in enumerate(lines):
+        # Apply the corresponding marker, looping if the logo gets taller
+        marker = markers[i % len(markers)]
+        styled_lines.append(f"{marker}{line}")
+        
+    return "\n".join(styled_lines)
 
 def start_new_conversation(user_id: str) -> dict:
     new_thread_id = str(uuid.uuid4())
@@ -69,7 +90,11 @@ async def run():
             await seed_username(store, user_id)
 
             ui = ChatUI()
+            ui.set_model_name(model.name if hasattr(model, 'name') else provider)
             config = start_new_conversation(user_id)
+            gradient_logo = get_gradient_logo()
+            ui.append_block(gradient_logo)
+
             ui.append_block("Welcome back, " + settings["username"] + "!")
             ui.append_block("New session started. Type /help for commands.")
             if created:
@@ -180,6 +205,10 @@ async def run():
                     if user_input == "/new":
                         config = start_new_conversation(user_id)
                         ui.clear_transcript()
+                        
+                        # ---> USE THE NEW GRADIENT LOGO <---
+                        ui.append_block(get_gradient_logo())
+                        
                         ui.append_block("New conversation started. Type /help for commands.")
                         continue
 
@@ -236,4 +265,8 @@ async def run():
 
 
 def main():
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Suppress the ugly traceback when exiting via Ctrl+C
+        pass
