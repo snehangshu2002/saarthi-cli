@@ -19,10 +19,9 @@ COMMANDS = {
     "/exit": "Quit the chatbot",
     "/new": "Start a new conversation",
     "/resume": "Resume an older conversation",
-    # "/memory": "Show what the bot remembers about you",
+    "/mcp": "List connected MCP servers and their tools",
     "/help": "Show available commands",
     "/settings": "Show current settings",
-    "/mcp": "List connected MCP servers",
 }
 
 APP_STYLE = Style.from_dict(
