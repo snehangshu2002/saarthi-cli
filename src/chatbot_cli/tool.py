@@ -8,6 +8,9 @@ from langchain_core.tools import tool
 from chatbot_cli.mcp_client import get_mcp_tools
 import subprocess
 import sys
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # ── Bash / code runner ─────────────────────────────────────────────────────
 
