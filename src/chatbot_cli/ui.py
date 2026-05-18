@@ -16,6 +16,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import Processor, Transformation
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.selection import SelectionType
 
 from chatbot_cli.app_config import APP_STYLE, COMMANDS
 from chatbot_cli.clipboard import WindowsClipboard
@@ -32,17 +33,6 @@ STATUS_MESSAGES = [
     "Processing...",
     "Building answer...",
 ]
-
-# Invisible markers mapped to a smooth fiery gradient!
-GRADIENT_MARKERS = {
-    "\u200c": "#ff3300", # Deep Red-Orange
-    "\u200d": "#ff5500", 
-    "\u200e": "#ff7700", 
-    "\u200f": "#ff9900", 
-    "\u202a": "#ffbb00", 
-    "\u202b": "#ffdd00", # Bright Yellow
-}
-
 
 class SlashCommandCompleter(Completer):
     """Show slash commands only while typing a command at the prompt."""
@@ -79,15 +69,23 @@ class TranscriptProcessor(Processor):
                 source_to_display=lambda i: i,
                 display_to_source=lambda i: min(i, len(line_text)),
             )
-
-        # Process the Gradient Logo markers
-        for marker, hex_color in GRADIENT_MARKERS.items():
-            if line_text.startswith(marker):
-                return Transformation([(f"fg:{hex_color} bold", line_text)])
             
-        if line_text.startswith("\u200b"):
-            # Tool blocks (Orange).
-            return Transformation([("fg:#ffaa00", line_text)])
+        elif line_text[:1] in ["\u200c", "\u200d", "\u200e", "\u200f", "\u202a", "\u202b"]:
+            gradient_map = {
+                "\u200c": "fg:#fff5a0",  # soft yellow
+                "\u200d": "fg:#ffe066",  # warm yellow
+                "\u200e": "fg:#ffcc33",  # golden
+                "\u200f": "fg:#ffb000",  # amber
+                "\u202a": "fg:#ff9500",  # orange
+                "\u202b": "fg:#ff7a00",  # deep orange
+            }
+
+            marker = line_text[:1]
+            clean_text = line_text[1:]
+
+            return Transformation([
+                (gradient_map.get(marker, "fg:#ffffff"), clean_text)
+            ])
             
         elif line_text.startswith("⏱"):
             # Timing messages (Orange)
@@ -163,7 +161,7 @@ class ChatUI:
         self.input = TextArea(
             prompt=[("fg:#ffaa00 bold", "> ")],
             multiline=True, 
-            height=2,       
+            height=lambda: min(6, self.input.document.line_count),       
             wrap_lines=True,
             history=self._history,
             completer=SlashCommandCompleter(),
@@ -297,8 +295,34 @@ class ChatUI:
                 if self._pending_input is not None and not self._pending_input.done():
                     self._pending_input.set_result("__cancel_select__")
 
+        @bindings.add("c-space")
+        def _(event):
+            """Start keyboard selection mode to allow copying text."""
+            buffer = event.app.current_buffer
+            if buffer.selection_state:
+                buffer.exit_selection()
+                self.set_status("Selection cleared.")
+            else:
+                buffer.start_selection(selection_type=SelectionType.CHARACTERS)
+                self.set_status("Selection started. Move arrows to highlight, Ctrl+C to copy.")
+
         @bindings.add("c-c")
         def _(event):
+            buffer = event.app.current_buffer
+
+            # 1. If text is highlighted (via Ctrl+Space), copy it!
+            if buffer.selection_state:
+                try:
+                    data = buffer.copy_selection()
+                    event.app.clipboard.set_data(data)
+                    self.set_status("Copied to clipboard!")
+                    buffer.exit_selection()
+                    self.app.invalidate()
+                    return
+                except Exception:
+                    pass
+
+            # 2. If no text is highlighted, double-press to exit
             now = time.monotonic()
             if now < self._ctrl_c_armed_until:
                 if self._pending_input is not None and not self._pending_input.done():
@@ -307,6 +331,15 @@ class ChatUI:
             self._ctrl_c_armed_until = now + 2.5
             self._status = [("fg:#aaaaaa", "Press Ctrl-C again to exit")]
             self.app.invalidate()
+
+        @bindings.add("c-v")
+        def _(event):
+            """Handle pasting text into the input field."""
+            if not self.app.layout.has_focus(self.input):
+                self.app.layout.focus(self.input)
+            data = event.app.clipboard.get_data()
+            if data.text:
+                self.input.buffer.insert_text(data.text)
 
         @bindings.add("c-t")
         def _(event):
