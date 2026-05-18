@@ -15,13 +15,12 @@ def _args_preview(args: dict, max_chars: int = 80) -> str:
 async def stream_response(graph, user_input: str, config: dict, ui) -> str:
     full_text = ""
     ui.start_bot_message()
-    # Reset tool blocks for this new response turn
-    ui._tool_blocks = []
-    ui._tool_expanded = set()
 
     # Track tool call names keyed by tool_call_id so ToolMessage can label itself
     _pending_tool_names: dict[str, str] = {}
     _pending_tool_args: dict[str, dict] = {}
+    # Track in-flight tool blocks by tool_call_id
+    _in_flight_blocks: dict[str, int] = {}
 
     async for chunk, metadata in graph.astream(
         {"messages": [{"role": "user", "content": user_input}]},
@@ -41,6 +40,12 @@ async def stream_response(graph, user_input: str, config: dict, ui) -> str:
                     _pending_tool_args[tid] = args
                 preview = _args_preview(args) if args else ""
                 ui.set_status(f"⚙  {name}({preview})…")
+                
+                # Create in-flight tool block showing execution in progress
+                header = f"({_args_preview(args)})" if args else ""
+                in_flight_output = "Running…"
+                idx = ui.append_tool_block(name, f"{name}{header}\n{in_flight_output}", in_flight=True)
+                _in_flight_blocks[tid] = idx
 
         # ── Tool result from tools_node ─────────────────────────────────────
         if node == "tools" and isinstance(chunk, ToolMessage):
@@ -54,7 +59,13 @@ async def stream_response(graph, user_input: str, config: dict, ui) -> str:
 
             raw_output = str(chunk.content)
             full_block = f"{tool_name}{header}\n{raw_output}"
-            ui.append_tool_block(tool_name, full_block)
+
+            # Update the in-flight block with actual results and mark it complete
+            if tid in _in_flight_blocks:
+                ui.update_tool_block(_in_flight_blocks[tid], full_block, in_flight=False)
+                del _in_flight_blocks[tid]
+            else:
+                ui.append_tool_block(tool_name, full_block, in_flight=False)
             ui.set_status("")
 
         # ── Stream final text ───────────────────────────────────────────────
