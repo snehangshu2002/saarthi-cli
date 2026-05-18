@@ -1,7 +1,7 @@
 import uuid
 from typing import Literal
 
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage, BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.store.base import BaseStore
@@ -125,12 +125,15 @@ def _latest_human_content(messages: list[BaseMessage]) -> str:
 # Build graph — called once from main.py
 # ──────────────────────────────────────────
 
-def build_graph(model, checkpointer, store):
+def build_graph(model, checkpointer, store, tools=None):
     """
     Compile and return the graph.
     Nodes are defined inside so they close over `model` naturally —
     no global registry needed.
     """
+    tools = tools or []
+    tool_map = {t.name: t for t in tools}
+    model_with_tools = model.bind_tools(tools) if tools else model
     memory_extractor = model.with_structured_output(MemoryDecision)
 
     # ── nodes ──────────────────────────────
@@ -196,21 +199,32 @@ def build_graph(model, checkpointer, store):
         # sanitize before sending — strips empty AIMessages from checkpointed history
         messages.extend(_sanitize_messages(state["messages"]))
 
-        # collect streaming chunks then return one merged AIMessage
-        # this keeps state clean — no empty chunks stored in checkpoints
-        chunks = []
-        async for chunk in model.astream(messages):
-            chunks.append(chunk)
+        # invoke model (with tools bound if any)
+        response = await model_with_tools.ainvoke(messages)
 
-        # merge all chunks into a single AIMessage for clean checkpoint storage
-        if chunks:
-            merged = chunks[0]
-            for c in chunks[1:]:
-                merged = merged + c
-            final_message = AIMessage(content=merged.content or "")
-        else:
-            final_message = AIMessage(content="(no response)")
+        # tool execution loop — keeps going until model stops calling tools
+        while response.tool_calls:
+            tool_messages = []
+            for tc in response.tool_calls:
+                t = tool_map.get(tc["name"])
+                if t is None:
+                    result = f"ERROR: unknown tool '{tc['name']}'"
+                else:
+                    try:
+                        if hasattr(t, "ainvoke"):
+                            result = await t.ainvoke(tc["args"])
+                        else:
+                            result = t.invoke(tc["args"])
+                    except Exception as e:
+                        result = f"ERROR: {e}"
+                tool_messages.append(
+                    ToolMessage(content=str(result), tool_call_id=tc["id"])
+                )
+            # append assistant tool-call message + results, then call model again
+            messages = messages + [response] + tool_messages
+            response = await model_with_tools.ainvoke(messages)
 
+        final_message = AIMessage(content=response.content or "(no response)")
         return {"messages": [final_message]}
 
     async def summarize_conversation(state: ChatState):
