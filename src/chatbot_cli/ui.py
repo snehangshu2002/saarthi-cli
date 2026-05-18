@@ -1,31 +1,31 @@
 import asyncio
 import time
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.application import Application
-from prompt_toolkit.clipboard import ClipboardData
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.document import Document
-from prompt_toolkit.history import InMemoryHistory
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import HSplit, Layout, Window
-from prompt_toolkit.layout.containers import Float, FloatContainer
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.layout.processors import Processor, Transformation
-from prompt_toolkit.widgets import TextArea
+from prompt_toolkit import PromptSession #Session management.
+from prompt_toolkit.application import Application #Application management.
+from prompt_toolkit.clipboard import ClipboardData #Used for copy-paste support.
+from prompt_toolkit.completion import Completer, Completion #Used for autocomplete. e.g /he<TAB> >/help
+from prompt_toolkit.document import Document #Document management.
+from prompt_toolkit.history import InMemoryHistory #History management.
+from prompt_toolkit.key_binding import KeyBindings #Custom keyboard shortcuts.
+from prompt_toolkit.keys import Keys #Special keyboard keys.
+from prompt_toolkit.layout import HSplit, Layout, Window #Used to design UI layout.
+from prompt_toolkit.layout.containers import Float, FloatContainer #Floating popup menus used for autocomplete dropdown.
+from prompt_toolkit.layout.controls import FormattedTextControl #Used to display formatted text.
+from prompt_toolkit.layout.menus import CompletionsMenu #Autocomplete popup UI.
+from prompt_toolkit.layout.processors import Processor, Transformation #Used to process and transform text.
+from prompt_toolkit.widgets import TextArea #Used to display text.
 
 from chatbot_cli.app_config import APP_STYLE, COMMANDS
-from chatbot_cli.clipboard import WindowsClipboard
-from chatbot_cli.formatting import format_ai_output
+from chatbot_cli.clipboard import WindowsClipboard #Used for copy-paste support.
+from chatbot_cli.formatting import format_ai_output #Used to format AI output.
 
 
 class SlashCommandCompleter(Completer):
     """Show slash commands only while typing a command at the prompt."""
 
     def get_completions(self, document, complete_event):
-        text = document.text_before_cursor
+        text = document.text_before_cursor #Gets current input before cursor e.g. /he
         if not text.startswith("/") or " " in text:
             return
 
@@ -140,7 +140,7 @@ class ChatUI:
             mouse_support=True,
             style=APP_STYLE,
             key_bindings=self._build_key_bindings(),
-            clipboard=WindowsClipboard(),
+            # clipboard=WindowsClipboard(),
         )
 
     def _build_key_bindings(self) -> KeyBindings:
@@ -278,7 +278,8 @@ class ChatUI:
                     self._pending_input.set_exception(EOFError())
                 return
             self._ctrl_c_armed_until = now + 2.5
-            self.set_status("Press Ctrl-C again to exit")
+            self._status = [("fg:#aaaaaa", "Press Ctrl-C again to exit")]
+            self.app.invalidate()
 
         @bindings.add("c-space")
         def _(event):
@@ -309,6 +310,8 @@ class ChatUI:
         return bindings
 
     def _get_status_bar_text(self):
+        if isinstance(self._status, list):
+            return self._status
         return [("class:status", f" {self._status}" if self._status else "")]
 
     def _page_scroll_count(self) -> int:
