@@ -11,7 +11,7 @@ from chatbot_cli.providers import SUPPORTED_PROVIDERS
 console = Console()
 
 
-def load_settings() -> dict:
+def load_settings() -> dict: # Read settings.json from disk.
     defaults = {"username": "", "provider": "", "api_key": ""}
     if not os.path.exists(SETTINGS_FILE):
         save_settings(defaults)
@@ -25,7 +25,7 @@ def load_settings() -> dict:
         return defaults
 
 
-def save_settings(settings: dict) -> None:
+def save_settings(settings: dict) -> None: # Writes settings dict → JSON file.
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
