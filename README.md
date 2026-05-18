@@ -88,7 +88,8 @@ uv run python main.py
 ```bash
 curl -fsSL https://raw.githubusercontent.com/snehangshu2002/saarthi-cli/main/install.sh | bash
 ```
-
+> **Note:** The install script is for Linux and macOS only.
+> Windows users should install via `pip install saarthi-cli` or `uv tool install saarthi-cli`.
 ---
 
 ## First-time setup
