@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "saarthi-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "Your AI copilot in the terminal - a LangGraph-powered CLI chatbot with long-term memory"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -52,6 +52,7 @@ dependencies = [
     "pyfiglet>=1.0.4",
     "rich>=15.0.0",
     "wikipedia>=1.4.0",
+    "langchain-mistralai>=1.1.4",
 ]
 
 [project.scripts]
