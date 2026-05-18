@@ -1,11 +1,11 @@
 .env
-data
-temp.ipynb
+data/
 *.ipynb
 *.pyc
 *.pyo
-*__pycache__
+__pycache__/
 *.venv
 *.env
-*.json
+# User data files (created at runtime)
 settings.json
+mcp_config.json

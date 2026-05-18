@@ -25,8 +25,11 @@
 ## Quickstart
 
 ```bash
-# Install (from PyPI when published)
+# Install via pip (from PyPI when published)
 pip install saarthi-cli
+
+# Or one-line installer (when published)
+curl -fsSL https://raw.githubusercontent.com/snehangshu2002/saarthi-cli/main/install.sh | bash
 
 # Run
 saarthi
