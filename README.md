@@ -7,6 +7,7 @@ No browser. No Electron. No cloud dashboard.
 
 > Current release: `0.1.0`
 
+
 [![PyPI version](https://img.shields.io/pypi/v/saarthi-cli)](https://pypi.org/project/saarthi-cli/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/saarthi-cli)](https://pypi.org/project/saarthi-cli/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/saarthi-cli)](https://pypi.org/project/saarthi-cli/)
