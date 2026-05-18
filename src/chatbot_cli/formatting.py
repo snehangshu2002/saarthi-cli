@@ -1,5 +1,9 @@
 from datetime import datetime
-
+import re
+from io import StringIO
+from shutil import get_terminal_size
+from rich.console import Console
+from rich.markdown import Markdown
 
 def message_content_text(message) -> str: # Extract text content from message
     content = getattr(message, "content", "")
@@ -56,18 +60,39 @@ def render_messages(messages: list) -> str: # Render messages for display in tra
     return "\n\n".join(blocks)
 
 
-def format_ai_output(text: str) -> str:
-    """Format assistant output for a plain terminal transcript."""
-    text = strip_code_fences(text)
-    if looks_like_code(text):
-        return text
-    lines = text.splitlines()
-    if not lines:
-        return "*"
-    first = f"* {lines[0]}"
-    rest = [f"  {line}" if line else "" for line in lines[1:]]
-    return "\n".join([first, *rest])
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
 
+
+def strip_ansi(text: str) -> str:
+    """Remove all ANSI escape sequences from a string."""
+    return _ANSI_ESCAPE.sub("", text)
+
+
+def format_ai_output(text: str) -> str:
+    text = strip_code_fences(text)
+
+    # Render markdown to a string buffer using Rich, then strip the ANSI
+    # escape codes that Rich injects.  prompt_toolkit's TextArea stores plain
+    # text, so raw escape sequences would appear as literal ^[[1m garbage and
+    # make text impossible to copy.
+    buffer = StringIO()
+
+    console = Console(
+        file=buffer,
+        force_terminal=False,   # plain text mode — no escape codes
+        color_system=None,      # explicitly disable colour output
+        width=max(40, get_terminal_size().columns - 6),
+        highlight=False,
+        markup=False,
+    )
+
+    console.print(Markdown(text))
+
+    result = buffer.getvalue().rstrip()
+
+    # Belt-and-suspenders: strip any residual ANSI codes in case Rich still
+    # sneaks some through (e.g. from Markdown rule rendering).
+    return strip_ansi(result)
 
 def strip_code_fences(text: str) -> str:
     """Remove ```python, ``` lines. Keeps the actual code, drops the markdown wrapper."""
@@ -80,20 +105,20 @@ def strip_code_fences(text: str) -> str:
     return "\n".join(cleaned).strip("\n")
 
 
-def looks_like_code(text: str) -> bool: # Heuristic to detect if text is code.
-    if "\nclass " in f"\n{text}" or "\ndef " in f"\n{text}":
-        return True
-    code_markers = (
+def looks_like_code(text: str) -> bool:
+    code_patterns = (
+        "def ",
+        "class ",
         "import ",
         "from ",
         "return ",
-        "const ",
-        "let ",
-        "var ",
-        "function ",
+        "{",
+        "}",
+        ";",
+        "SELECT ",
         "#include",
     )
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) < 2:
-        return False
-    return sum(line.startswith(code_markers) for line in lines) >= 2
+
+    text_lower = text.lower()
+
+    return any(pattern.lower() in text_lower for pattern in code_patterns)
