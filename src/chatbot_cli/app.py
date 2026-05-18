@@ -23,6 +23,8 @@ from chatbot_cli.settings import ensure_mcp_config
 from chatbot_cli.tool import build_tools
 console = Console()
 
+# Version - kept in sync with pyproject.toml
+__version__ = "0.1.0"
 
 SAARTHI_LOGO = """
 ███████╗ █████╗  █████╗ ██████╗ ████████╗██╗  ██╗██╗
@@ -54,6 +56,10 @@ async def run():
     os.makedirs(DATA_DIR, exist_ok=True)
     session = create_chat_session()
     created = ensure_mcp_config()
+    
+    # Check for updates in background (non-blocking)
+    asyncio.create_task(check_for_updates(__version__))
+    
     # console.print(Rule("[bold cyan]Chatbot[/]"))
     tools = await build_tools()
     settings = load_settings()
@@ -270,7 +276,17 @@ async def run():
 
             await ui.run(chat_loop)
 
-
+async def check_for_updates(current_version: str):
+    import urllib.request, json
+    try:
+        url = f"https://pypi.org/pypi/saarthi-cli/json"
+        with urllib.request.urlopen(url, timeout=3) as r:
+            data = json.load(r)
+        latest = data["info"]["version"]
+        if latest > current_version:
+            console.print(f"[yellow]Update available: {latest} (current: {current_version})[/]")
+    except: pass
+    
 def main():
     try:
         asyncio.run(run())
