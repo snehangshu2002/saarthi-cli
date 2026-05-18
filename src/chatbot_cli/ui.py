@@ -101,7 +101,7 @@ class ChatUI:
             text="",
             read_only=True,
             focusable=True,
-            focus_on_click=True,
+            focus_on_click=False,
             scrollbar=True,
             wrap_lines=True,
             style="class:transcript",
@@ -239,15 +239,15 @@ class ChatUI:
 
         @bindings.add("home")
         def _(event):
-            self.app.layout.focus(self.transcript)
             self.transcript.buffer.cursor_position = 0
-            self.set_status("Top of transcript. Tab returns to input.")
+            self.app.invalidate()
 
         @bindings.add("end")
         def _(event):
-            self.app.layout.focus(self.transcript)
-            self.transcript.buffer.cursor_position = len(self.transcript.buffer.text)
-            self.set_status("Bottom of transcript. Tab returns to input.")
+            self.transcript.buffer.cursor_position = len(
+                self.transcript.buffer.text
+            )
+            self.app.invalidate()
 
         @bindings.add("escape")
         def _(event):
@@ -267,15 +267,27 @@ class ChatUI:
         @bindings.add("c-c")
         def _(event):
             buffer = event.app.current_buffer
+
+            # Copy selected text
             if buffer.selection_state:
-                event.app.clipboard.set_data(buffer.copy_selection())
+                copied = buffer.copy_selection()
+                event.app.clipboard.set_data(copied)
+
                 if self.app.layout.has_focus(self.transcript):
                     self.set_status("Transcript selection copied.")
-                return
-            if self.has_selection():
-                self.cancel_selection()
-                if self._pending_input is not None and not self._pending_input.done():
-                    self._pending_input.set_result("__cancel_select__")
+
+                    # Clear selection
+                    buffer.exit_selection()
+
+                    # Return focus to input automatical ly
+                    self.app.layout.focus(self.input)
+
+                    # Put cursor at end of input
+                    self.input.buffer.cursor_position = len(
+                        self.input.buffer.text
+                    )
+
+                self.app.invalidate()
                 return
             now = time.monotonic()
             if now < self._ctrl_c_armed_until:
@@ -327,13 +339,23 @@ class ChatUI:
         return max(1, info.window_height - 2)
 
     def _scroll_transcript(self, amount: int):
-        self.app.layout.focus(self.transcript)
-        buffer = self.transcript.buffer
+        transcript_buffer = self.transcript.buffer
+
+        current_focus = self.app.layout.current_window
+
         if amount > 0:
-            buffer.cursor_down(count=amount)
+            transcript_buffer.cursor_down(count=amount)
         elif amount < 0:
-            buffer.cursor_up(count=-amount)
-        self.set_status("Scrolling transcript. Mouse wheel/PageUp/PageDown move history, Tab returns to input.")
+            transcript_buffer.cursor_up(count=-amount)
+
+        # Restore original focus
+        if current_focus:
+            self.app.layout.focus(current_focus)
+
+        self.set_status(
+            "Scrolling transcript. Mouse wheel/PageUp/PageDown move history."
+        )
+
         self.app.invalidate()
 
     def _handle_transcript_mouse_event(self, mouse_event):
