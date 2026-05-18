@@ -27,12 +27,13 @@ COMMANDS = {
 APP_STYLE = Style.from_dict(
     {
         "transcript": "",
-        "status": "bg:#444444 #aaaaaa",
+        "status": "#ff8c00",
         "input": "",
         "user-line": "bg:#2a2a2a #ffffff",
-        "completion-menu": "",
+        "completion-menu": "bg:default",
+        "completion-menu.completion": "bg:default",
         "completion-menu.completion.current": "reverse",
-        "completion-menu.meta.completion": "",
+        "completion-menu.meta.completion": "bg:default",
         "completion-menu.meta.completion.current": "reverse",
     }
 )
