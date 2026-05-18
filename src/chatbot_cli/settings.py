@@ -5,12 +5,12 @@ from prompt_toolkit.shortcuts import input_dialog, message_dialog, radiolist_dia
 from rich.console import Console
 from rich.rule import Rule
 from pathlib import Path
-from chatbot_cli.app_config import SETTINGS_FILE
+from chatbot_cli.app_config import SETTINGS_FILE, USER_DATA_DIR
 from chatbot_cli.providers import SUPPORTED_PROVIDERS
 
 console = Console()
 
-MCP_CONFIG_PATH = Path("mcp_config.json")
+MCP_CONFIG_PATH = USER_DATA_DIR / "mcp_config.json"
 DEFAULT_MCP_CONFIG = {
     "mcpServers": {
         "filesystem": {
@@ -28,6 +28,7 @@ DEFAULT_MCP_CONFIG = {
 
 def ensure_mcp_config():
     """Create mcp_config.json with defaults if it doesn't exist."""
+    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not MCP_CONFIG_PATH.exists():
         MCP_CONFIG_PATH.write_text(
             json.dumps(DEFAULT_MCP_CONFIG, indent=2)
@@ -35,6 +36,7 @@ def ensure_mcp_config():
         return True   # created fresh
     return False      # already existed
 def load_settings() -> dict: # Read settings.json from disk.
+    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     defaults = {"username": "", "provider": "", "api_key": ""}
     if not os.path.exists(SETTINGS_FILE):
         save_settings(defaults)
@@ -49,6 +51,7 @@ def load_settings() -> dict: # Read settings.json from disk.
 
 
 def save_settings(settings: dict) -> None: # Writes settings dict → JSON file.
+    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
