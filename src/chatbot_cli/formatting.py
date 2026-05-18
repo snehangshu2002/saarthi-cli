@@ -69,7 +69,6 @@ def strip_ansi(text: str) -> str:
 
 
 def format_ai_output(text: str) -> str:
-    text = strip_code_fences(text)
 
     # Render markdown to a string buffer using Rich, then strip the ANSI
     # escape codes that Rich injects.  prompt_toolkit's TextArea stores plain
