@@ -304,15 +304,27 @@ async def run():
             await ui.run(chat_loop)
 
 async def check_for_updates(current_version: str):
-    import urllib.request, json
-    try:
-        url = f"https://pypi.org/pypi/saarthi-cli/json"
+    import asyncio
+    import json
+    import urllib.request
+    from packaging.version import Version
+
+    def _fetch():
+        url = "https://pypi.org/pypi/saarthi-cli/json"
         with urllib.request.urlopen(url, timeout=3) as r:
-            data = json.load(r)
+            return json.load(r)
+
+    try:
+        data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
         latest = data["info"]["version"]
-        if latest > current_version:
-            console.print(f"[yellow]Update available: {latest} (current: {current_version})[/]")
-    except: pass
+        if Version(latest) > Version(current_version):
+            console.print(
+                f"[yellow]A new version is available: {latest} "
+                f"(you have {current_version}). "
+                f"Run 'pip install --upgrade saarthi-cli' to update.[/]"
+            )
+    except (OSError, KeyError, ValueError):
+        pass  # network unavailable or unexpected API response — silently skip
     
 def main():
     try:
