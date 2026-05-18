@@ -35,6 +35,33 @@ SAARTHI_LOGO = """
 ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝
 """
 
+def create_double_boxed_text(lines: list[str]) -> str:
+    """Wraps a list of text strings cleanly into a double-lined box structure."""
+    if not lines:
+        return ""
+        
+    # Calculate box width based on the longest string
+    max_len = max(len(line) for line in lines)
+    
+    # Double-line box unicode characters
+    top_left, top_right = "╔", "╗"
+    bottom_left, bottom_right = "╚", "╝"
+    horiz, vert = "═", "║"
+    
+    boxed_lines = []
+    
+    # Top border line
+    boxed_lines.append(f"{top_left}{horiz * (max_len + 2)}{top_right}")
+    
+    # Content padded lines
+    for line in lines:
+        padded_line = line.ljust(max_len)
+        boxed_lines.append(f"{vert} {padded_line} {vert}")
+        
+    # Bottom border line
+    boxed_lines.append(f"{bottom_left}{horiz * (max_len + 2)}{bottom_right}")
+    
+    return "\n".join(boxed_lines)
 def get_gradient_logo():
     """Maps the logo lines to the invisible gradient markers defined in ui.py"""
     markers = ["\u200c", "\u200d", "\u200e", "\u200f", "\u202a", "\u202b"]
@@ -95,7 +122,7 @@ async def run():
             await seed_username(store, user_id)
 
             ui = ChatUI()
-            ui.set_model_name(model.name if hasattr(model, 'name') else provider)
+            ui.set_model_name(model.provider if hasattr(model, 'provider') else provider)
             config = start_new_conversation(user_id)
             gradient_logo = get_gradient_logo()
             ui.append_block(gradient_logo)
