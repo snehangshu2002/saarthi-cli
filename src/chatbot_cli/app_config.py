@@ -22,6 +22,7 @@ COMMANDS = {
     # "/memory": "Show what the bot remembers about you",
     "/help": "Show available commands",
     "/settings": "Show current settings",
+    "/mcp": "List connected MCP servers",
 }
 
 APP_STYLE = Style.from_dict(
