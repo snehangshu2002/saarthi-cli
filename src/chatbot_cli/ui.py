@@ -14,6 +14,7 @@ from prompt_toolkit.layout.containers import Float, FloatContainer #Floating pop
 from prompt_toolkit.layout.controls import FormattedTextControl #Used to display formatted text.
 from prompt_toolkit.layout.menus import CompletionsMenu #Autocomplete popup UI.
 from prompt_toolkit.layout.processors import Processor, Transformation #Used to process and transform text.
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.widgets import TextArea #Used to display text.
 
 from chatbot_cli.app_config import APP_STYLE, COMMANDS
@@ -106,6 +107,8 @@ class ChatUI:
             style="class:transcript",
             input_processors=[UserLineHighlighter()],
         )
+        self._transcript_mouse_handler = self.transcript.control.mouse_handler
+        self.transcript.control.mouse_handler = self._handle_transcript_mouse_event
         self.input = TextArea(
             prompt="> ",
             multiline=False,
@@ -238,14 +241,12 @@ class ChatUI:
         def _(event):
             self.app.layout.focus(self.transcript)
             self.transcript.buffer.cursor_position = 0
-            self.transcript.window.vertical_scroll = 0
             self.set_status("Top of transcript. Tab returns to input.")
 
         @bindings.add("end")
         def _(event):
             self.app.layout.focus(self.transcript)
             self.transcript.buffer.cursor_position = len(self.transcript.buffer.text)
-            self.transcript.window.vertical_scroll = 10**9
             self.set_status("Bottom of transcript. Tab returns to input.")
 
         @bindings.add("escape")
@@ -327,15 +328,22 @@ class ChatUI:
 
     def _scroll_transcript(self, amount: int):
         self.app.layout.focus(self.transcript)
-        scroll_one = (
-            self.transcript.window._scroll_down
-            if amount > 0
-            else self.transcript.window._scroll_up
-        )
-        for _ in range(abs(amount)):
-            scroll_one()
+        buffer = self.transcript.buffer
+        if amount > 0:
+            buffer.cursor_down(count=amount)
+        elif amount < 0:
+            buffer.cursor_up(count=-amount)
         self.set_status("Scrolling transcript. Mouse wheel/PageUp/PageDown move history, Tab returns to input.")
         self.app.invalidate()
+
+    def _handle_transcript_mouse_event(self, mouse_event):
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self._scroll_transcript(-3)
+            return None
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self._scroll_transcript(3)
+            return None
+        return self._transcript_mouse_handler(mouse_event)
 
     def _selection_block(self) -> str:
         if not self._selection_options:
