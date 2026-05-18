@@ -86,6 +86,10 @@ class ChatUI:
         self._pending_input = None
         self._stream_anchor = None
         self._status = ""
+        self._base_status = ""
+        self._spinner_index = 0
+        self._spinner_active = False
+        self._spinner_task = None
         self._selection_options = []
         self._selection_index = 0
         self._selection_title = ""
@@ -140,7 +144,7 @@ class ChatUI:
             mouse_support=True,
             style=APP_STYLE,
             key_bindings=self._build_key_bindings(),
-            # clipboard=WindowsClipboard(),
+            clipboard=WindowsClipboard(),
         )
 
     def _build_key_bindings(self) -> KeyBindings:
@@ -312,7 +316,8 @@ class ChatUI:
     def _get_status_bar_text(self):
         if isinstance(self._status, list):
             return self._status
-        return [("class:status", f" {self._status}" if self._status else "")]
+        spinner = ["|", "/", "-", "\\"][self._spinner_index % 4] if self._spinner_active else ""
+        return [("class:status", f" {spinner} {self._status}" if self._status else "")]
 
     def _page_scroll_count(self) -> int:
         info = self.transcript.window.render_info
@@ -399,7 +404,28 @@ class ChatUI:
 
     def set_status(self, text: str):
         self._status = text
-        self.app.invalidate()
+        self._base_status = text
+        if text:
+            if not self._spinner_active:
+                self._spinner_active = True
+                if self._spinner_task is None or self._spinner_task.done():
+                    self._spinner_task = asyncio.create_task(self._run_spinner())
+            self.app.invalidate()
+        else:
+            self._spinner_active = False
+            if self._spinner_task is not None:
+                self._spinner_task.cancel()
+                self._spinner_task = None
+            self.app.invalidate()
+
+    async def _run_spinner(self):
+        try:
+            while self._spinner_active:
+                self._spinner_index += 1
+                self.app.invalidate()
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            pass
 
     def start_bot_message(self):
         if self._transcript_text and not self._transcript_text.endswith("\n"):
