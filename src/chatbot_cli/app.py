@@ -40,7 +40,6 @@ def get_gradient_logo():
     styled_lines = []
     
     for i, line in enumerate(lines):
-        # Apply the corresponding marker, looping if the logo gets taller
         marker = markers[i % len(markers)]
         styled_lines.append(f"{marker}{line}")
         
@@ -55,7 +54,7 @@ async def run():
     os.makedirs(DATA_DIR, exist_ok=True)
     session = create_chat_session()
     created = ensure_mcp_config()
-    console.print(Rule("[bold cyan]Chatbot[/]"))
+    # console.print(Rule("[bold cyan]Chatbot[/]"))
     tools = await build_tools()
     settings = load_settings()
     if not settings_complete(settings):
@@ -190,6 +189,14 @@ async def run():
                         lines = ["Available commands:"]
                         for cmd, desc in COMMANDS.items():
                             lines.append(f"  {cmd}  -  {desc}")
+                            
+                        # ---> NEW COPY/PASTE INSTRUCTIONS ADDED HERE <---
+                        lines.append("")
+                        lines.append("Text Selection & Copying:")
+                        lines.append("  • Mouse Method: Hold the Shift key, click and drag your mouse to highlight, and right-click (or press Ctrl+C) to copy.")
+                        lines.append("  • Keyboard Method: Press Ctrl+Space to start highlighting. Use your Arrow Keys to select text, then press Ctrl+C to copy it!")
+                        lines.append("    (Note: Double-pressing Ctrl+C will still exit the app).")
+                        
                         ui.append_block("\n".join(lines))
                         continue
 
