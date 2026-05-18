@@ -10,7 +10,7 @@ No browser. No Electron. No cloud dashboard.
 
 [![PyPI version](https://img.shields.io/pypi/v/saarthi-cli)](https://pypi.org/project/saarthi-cli/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/saarthi-cli)](https://pypi.org/project/saarthi-cli/)
-[![License](https://img.shields.io/github/license/snehangshu2002/saarthi-cli)](https://github.com/snehangshu2002/saarthi-cli/blob/main/LICENSE)
+[![License](https://img.shields.io/pypi/l/saarthi-cli)](https://github.com/snehangshu2002/saarthi-cli/blob/main/LICENSE)
 [![GitHub release](https://img.shields.io/github/v/release/snehangshu2002/saarthi-cli)](https://github.com/snehangshu2002/saarthi-cli/releases)
 
 ---
