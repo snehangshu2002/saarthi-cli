@@ -27,7 +27,7 @@ COMMANDS = {
 APP_STYLE = Style.from_dict(
     {
         "transcript": "",
-        "status": "",
+        "status": "bg:#444444 #aaaaaa",
         "input": "",
         "user-line": "bg:#2a2a2a #ffffff",
         "completion-menu": "",
