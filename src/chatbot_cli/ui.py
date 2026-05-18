@@ -1,5 +1,6 @@
 import asyncio
 import time
+import random
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
@@ -20,6 +21,28 @@ from chatbot_cli.app_config import APP_STYLE, COMMANDS
 from chatbot_cli.clipboard import WindowsClipboard
 from chatbot_cli.formatting import format_ai_output
 
+# Dynamic status messages for the AI thinking phase
+STATUS_MESSAGES = [
+    "Thinking...",
+    "Planning...",
+    "Reasoning...",
+    "Analyzing context...",
+    "Writing response...",
+    "Connecting ideas...",
+    "Processing...",
+    "Building answer...",
+]
+
+# Invisible markers mapped to a smooth fiery gradient!
+GRADIENT_MARKERS = {
+    "\u200c": "#ff3300", # Deep Red-Orange
+    "\u200d": "#ff5500", 
+    "\u200e": "#ff7700", 
+    "\u200f": "#ff9900", 
+    "\u202a": "#ffbb00", 
+    "\u202b": "#ffdd00", # Bright Yellow
+}
+
 
 class SlashCommandCompleter(Completer):
     """Show slash commands only while typing a command at the prompt."""
@@ -39,21 +62,38 @@ class SlashCommandCompleter(Completer):
                 )
 
 
-class UserLineHighlighter(Processor):
-    """Highlight transcript lines that represent user messages."""
+class TranscriptProcessor(Processor):
+    """Highlights different types of lines in the transcript."""
 
     def apply_transformation(self, transformation_input):
         fragments = transformation_input.fragments
         line_text = "".join(text for _, text, *_ in fragments)
+
         if line_text.startswith("> "):
-            line_width = len(line_text)
-            pad = max(0, transformation_input.width - line_width)
-            styled_line = line_text + (" " * pad)
+            # USER MESSAGE: Pad with spaces to make the highlight span the complete row
+            pad_length = max(0, transformation_input.width - len(line_text))
+            styled_line = line_text + (" " * pad_length)
+            
             return Transformation(
                 [("class:user-line", styled_line)],
                 source_to_display=lambda i: i,
-                display_to_source=lambda i: min(i, line_width),
+                display_to_source=lambda i: min(i, len(line_text)),
             )
+
+        # Process the Gradient Logo markers
+        for marker, hex_color in GRADIENT_MARKERS.items():
+            if line_text.startswith(marker):
+                return Transformation([(f"fg:{hex_color} bold", line_text)])
+            
+        if line_text.startswith("\u200b"):
+            # Tool blocks (Orange).
+            return Transformation([("fg:#ffaa00", line_text)])
+            
+        elif line_text.startswith("⏱"):
+            # Timing messages (Orange)
+            return Transformation([("fg:#ffaa00", line_text)])
+
+        # Default text (LLM Output)
         return Transformation(fragments)
 
 
@@ -84,7 +124,6 @@ class ChatUI:
         self._history = InMemoryHistory()
         self._transcript_text = ""
         
-        # Ordered list of all transcript elements to completely prevent text corruption
         self._chunks = []  
         self._tool_blocks = []   
         self._tool_expanded = set()  
@@ -92,9 +131,14 @@ class ChatUI:
         self._pending_input = None
         self._status = ""
         self._base_status = ""
+        self._status_display = ""
         self._spinner_index = 0
         self._spinner_active = False
         self._spinner_task = None
+        self._turn_start_time = None 
+        
+        self.model_name = "Mistral" 
+        
         self._selection_options = []
         self._selection_index = 0
         self._selection_title = ""
@@ -110,17 +154,17 @@ class ChatUI:
             scrollbar=True,
             wrap_lines=True,
             style="class:transcript",
-            input_processors=[UserLineHighlighter()],
+            input_processors=[TranscriptProcessor()],
         )
         
-        # ADDED BACK: Wire up the mouse handler for scrolling
         self._transcript_mouse_handler = self.transcript.control.mouse_handler
         self.transcript.control.mouse_handler = self._handle_transcript_mouse_event
         
         self.input = TextArea(
-            prompt="> ",
-            multiline=False,
-            wrap_lines=False,
+            prompt=[("fg:#ffaa00 bold", "> ")],
+            multiline=True, 
+            height=2,       
+            wrap_lines=True,
             history=self._history,
             completer=SlashCommandCompleter(),
             complete_while_typing=True,
@@ -131,7 +175,8 @@ class ChatUI:
             [
                 self.transcript,
                 Window(height=1, char="─", style="fg:#444444"), 
-                self.input,
+                self.input,                                     
+                Window(height=1, char="─", style="fg:#444444"), 
                 Window(height=1, content=FormattedTextControl(self._get_status_bar_text)), 
             ]
         )
@@ -150,12 +195,16 @@ class ChatUI:
         self.app = Application(
             layout=Layout(layout, focused_element=self.input),
             full_screen=True,
-            # ENABLED MOUSE SUPPORT: Required for scroll wheel. Use Shift+Drag to copy!
             mouse_support=True, 
             style=APP_STYLE,
             key_bindings=self._build_key_bindings(),
             clipboard=WindowsClipboard(),
         )
+
+    def set_model_name(self, name: str):
+        """Allows app.py to dynamically update the model name shown in the footer."""
+        self.model_name = name
+        self.app.invalidate()
 
     def _build_key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
@@ -284,12 +333,17 @@ class ChatUI:
         if isinstance(self._status, list):
             return self._status
         spinner = ["|", "/", "-", "\\"][self._spinner_index % 4] if self._spinner_active else ""
-        if self._status:
+        
+        if self._spinner_active or self._status_display:
             return [
-                ("fg:#ffaa00 bold", f" {spinner} \u25b6\u25b6 " if spinner else " \u25b6\u25b6 "),
-                ("class:status", self._status)
+                ("fg:#ffaa00 bold", f" {spinner} ▶▶ " if spinner else " ▶▶ "),
+                ("fg:#ffaa00", self._status_display)
             ]
-        return [("class:status", "")]
+            
+        return [
+            ("fg:#ffaa00 bold", " ▶▶ "),
+            ("fg:#888888", f"{self.model_name} | Ctrl+T: Toggle | Ctrl+C x2: Exit")
+        ]
 
     def _page_scroll_count(self) -> int:
         info = self.transcript.window.render_info
@@ -314,7 +368,6 @@ class ChatUI:
 
         self.app.invalidate()
 
-    # ADDED BACK: Processes mouse wheel events and routes them to our smooth scrolling logic
     def _handle_transcript_mouse_event(self, mouse_event):
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
             self._scroll_transcript(-3)
@@ -358,6 +411,10 @@ class ChatUI:
         )
         self.app.invalidate()
 
+    # ─────────────────────────────────────────────────────────────────
+    # CHUNKED TRANSCRIPT LOGIC
+    # ─────────────────────────────────────────────────────────────────
+
     def _rebuild_transcript(self):
         text = ""
         for chunk in self._chunks:
@@ -369,6 +426,8 @@ class ChatUI:
                 text += self._tool_block_text(idx, tb['name'], tb['output'], tb['in_flight'])
             elif chunk['type'] == 'bot':
                 text += chunk['text'] + "\n"
+            elif chunk['type'] == 'time':
+                text += chunk['text'] + "\n\n"
 
         self._transcript_text = text
         self._render_transcript()
@@ -385,6 +444,12 @@ class ChatUI:
         self._rebuild_transcript()
 
     def start_bot_message(self):
+        self._turn_start_time = time.time()
+        
+        self._spinner_active = True
+        if self._spinner_task is None or self._spinner_task.done():
+            self._spinner_task = asyncio.create_task(self._run_spinner())
+            
         self._chunks.append({'type': 'bot', 'text': '* '})
         self._rebuild_transcript()
 
@@ -396,6 +461,14 @@ class ChatUI:
 
     def finish_bot_message(self, text: str):
         self.update_bot_message(text)
+        
+        if self._turn_start_time:
+            elapsed = time.time() - self._turn_start_time
+            self._turn_start_time = None
+            self._chunks.append({'type': 'time', 'text': f"⏱  Total time: ({elapsed:.1f}s)"})
+            self._rebuild_transcript()
+            
+        self.set_status("") 
 
     def append_tool_block(self, tool_name: str, full_output: str, in_flight: bool = False) -> int:
         idx = len(self._tool_blocks)
@@ -413,26 +486,31 @@ class ChatUI:
     def _tool_block_text(self, idx: int, tool_name: str, full_output: str, in_flight: bool) -> str:
         lines = full_output.rstrip().splitlines()
         first_line = lines[0] if lines else tool_name
-        header = f"┌ 🔧 {first_line}"
         
+        header = f"\u200b┌ 🔧 {first_line}"
         expanded = idx in self._tool_expanded
 
+        def format_body(lines_list):
+            if not lines_list:
+                return "\u200b  (No output)"
+            return "\n".join(f"\u200b  {l}" for l in lines_list)
+
         if not in_flight and not expanded:
-            return f"\n{header}  [✓]\n└{'─' * 24}\n"
+            return f"\n{header}  [✓]\n\u200b└{'─' * 24}\n"
             
         if not in_flight and expanded:
-            body_lines = lines[1:] if len(lines) > 1 else ["  (No output)"]
-            body = "\n".join(f"  {l}" for l in body_lines)
-            hint = "\\ Tool output expanded. Ctrl+T to collapse."
+            body_lines = lines[1:] if len(lines) > 1 else []
+            body = format_body(body_lines)
+            hint = "\u200b\\ Tool output expanded. Ctrl+T to collapse."
             return f"\n{header}  [✓]\n{body}\n{hint}\n"
 
         if expanded:
-            body_lines = lines[1:] if len(lines) > 1 else ["  (Waiting for output...)"]
-            body = "\n".join(f"  {l}" for l in body_lines)
-            hint = "\\ Tool output expanded. Ctrl+T to collapse."
+            body_lines = lines[1:] if len(lines) > 1 else []
+            body = format_body(body_lines) if body_lines else "\u200b  (Waiting for output...)"
+            hint = "\u200b\\ Tool output expanded. Ctrl+T to collapse."
         else:
-            body = "  Running..."
-            hint = "\\ Press Ctrl+T to see whole output."
+            body = "\u200b  Running..."
+            hint = "\u200b\\ Press Ctrl+T to see whole output."
 
         return f"\n{header}\n{body}\n{hint}\n"
 
@@ -470,6 +548,7 @@ class ChatUI:
             self.app.invalidate()
         else:
             self._spinner_active = False
+            self._status_display = ""
             if self._spinner_task is not None:
                 self._spinner_task.cancel()
                 self._spinner_task = None
@@ -477,8 +556,21 @@ class ChatUI:
 
     async def _run_spinner(self):
         try:
+            ticks = 0
+            current_msg = random.choice(STATUS_MESSAGES)
+            
             while self._spinner_active:
                 self._spinner_index += 1
+                ticks += 1
+                
+                if ticks % 15 == 0:
+                    current_msg = random.choice(STATUS_MESSAGES)
+                
+                if self._base_status:
+                    self._status_display = self._base_status
+                else:
+                    self._status_display = current_msg
+
                 self.app.invalidate()
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
@@ -492,4 +584,7 @@ class ChatUI:
 
     async def run(self, worker):
         self.app.create_background_task(worker())
-        await self.app.run_async()
+        try:
+            await self.app.run_async()
+        except asyncio.CancelledError:
+            pass
