@@ -59,11 +59,16 @@ class TranscriptProcessor(Processor):
         fragments = transformation_input.fragments
         line_text = "".join(text for _, text, *_ in fragments)
 
+        # 1. BOT MESSAGE PREFIX: Highlight the chevron in bold orange
+        if line_text.startswith("❯ "):
+            return Transformation([
+                ("fg:#ffaa00 bold", "❯ "),
+                ("", line_text[2:])
+            ])
+
         if line_text.startswith("> "):
-            # USER MESSAGE: Pad with spaces to make the highlight span the complete row
             pad_length = max(0, transformation_input.width - len(line_text))
             styled_line = line_text + (" " * pad_length)
-            
             return Transformation(
                 [("class:user-line", styled_line)],
                 source_to_display=lambda i: i,
@@ -72,26 +77,20 @@ class TranscriptProcessor(Processor):
             
         elif line_text[:1] in ["\u200c", "\u200d", "\u200e", "\u200f", "\u202a", "\u202b"]:
             gradient_map = {
-                "\u200c": "fg:#fff5a0",  # soft yellow
-                "\u200d": "fg:#ffe066",  # warm yellow
-                "\u200e": "fg:#ffcc33",  # golden
-                "\u200f": "fg:#ffb000",  # amber
-                "\u202a": "fg:#ff9500",  # orange
-                "\u202b": "fg:#ff7a00",  # deep orange
+                "\u200c": "fg:#fff5a0",
+                "\u200d": "fg:#ffe066",
+                "\u200e": "fg:#ffcc33",
+                "\u200f": "fg:#ffb000",
+                "\u202a": "fg:#ff9500",
+                "\u202b": "fg:#ff7a00",
             }
-
             marker = line_text[:1]
             clean_text = line_text[1:]
-
-            return Transformation([
-                (gradient_map.get(marker, "fg:#ffffff"), clean_text)
-            ])
+            return Transformation([(gradient_map.get(marker, "fg:#ffffff"), clean_text)])
             
         elif line_text.startswith("⏱"):
-            # Timing messages (Orange)
             return Transformation([("fg:#ffaa00", line_text)])
 
-        # Default text (LLM Output)
         return Transformation(fragments)
 
 
@@ -226,6 +225,9 @@ class ChatUI:
             if not text or self._pending_input is None or self._pending_input.done():
                 return
 
+            # START CLOCK HERE: Captures full pipeline execution (Tools + LLM)
+            self._turn_start_time = time.time()
+
             self._pending_input.set_result(text)
             buffer.set_document(Document("", 0), bypass_readonly=True)
 
@@ -319,7 +321,8 @@ class ChatUI:
                     buffer.exit_selection()
                     self.app.invalidate()
                 except Exception as e:
-                    self.set_status(f"Copy failed: {e}")
+                    # Safely shows text without triggering an unwanted spinner
+                    self.set_status(f"Copy failed: {e}", show_spinner=False)
                     buffer.exit_selection()
                 return
 
@@ -366,18 +369,23 @@ class ChatUI:
     def _get_status_bar_text(self):
         if isinstance(self._status, list):
             return self._status
+        
         spinner = ["|", "/", "-", "\\"][self._spinner_index % 4] if self._spinner_active else ""
         
-        if self._spinner_active or self._status_display:
-            return [
-                ("fg:#ffaa00 bold", f" {spinner} ▶▶ " if spinner else " ▶▶ "),
-                ("fg:#ffaa00", self._status_display)
-            ]
-            
-        return [
-            ("fg:#ffaa00 bold", " ▶▶ "),
-            ("fg:#888888", f"{self.model_name} | Ctrl+T: Toggle | Ctrl+C x2: Exit")
+        # Fallback to "AI Model" if it evaluates to None or empty
+        display_model = self.model_name if (self.model_name and str(self.model_name).lower() != "none") else "AI Model"
+        
+        base_footer = [
+            ("fg:#ffaa00 bold", f" {spinner} ▶▶ " if spinner else " ▶▶ "),
+            ("fg:#888888", f"{display_model} | ")
         ]
+        
+        if self._spinner_active or self._status_display:
+            base_footer.append(("fg:#ffaa00", self._status_display))
+        else:
+            base_footer.append(("fg:#888888", "Ctrl+T: Toggle | Ctrl+C x2: Exit"))
+            
+        return base_footer
 
     def _page_scroll_count(self) -> int:
         info = self.transcript.window.render_info
@@ -478,19 +486,18 @@ class ChatUI:
         self._rebuild_transcript()
 
     def start_bot_message(self):
-        self._turn_start_time = time.time()
-        
+        # NOTE: self._turn_start_time is removed from here so it doesn't overwrite the turn clock!
         self._spinner_active = True
         if self._spinner_task is None or self._spinner_task.done():
             self._spinner_task = asyncio.create_task(self._run_spinner())
             
-        self._chunks.append({'type': 'bot', 'text': '* '})
+        self._chunks.append({'type': 'bot', 'text': '❯ '})
         self._rebuild_transcript()
 
     def update_bot_message(self, text: str):
         if not self._chunks or self._chunks[-1]['type'] != 'bot':
             self.start_bot_message()
-        self._chunks[-1]['text'] = '* ' + format_ai_output(text)
+        self._chunks[-1]['text'] = '❯ ' + format_ai_output(text)
         self._rebuild_transcript()
 
     def finish_bot_message(self, text: str):
@@ -571,14 +578,22 @@ class ChatUI:
             return None
         return self._selection_options[self._selection_index]
 
-    def set_status(self, text: str):
+    def set_status(self, text: str, show_spinner: bool = False):
+        """Updates the status text, with an option to toggle the visual spinner."""
         self._status = text
         self._base_status = text
         if text:
-            if not self._spinner_active:
+            self._status_display = text
+            if show_spinner and not self._spinner_active:
                 self._spinner_active = True
                 if self._spinner_task is None or self._spinner_task.done():
                     self._spinner_task = asyncio.create_task(self._run_spinner())
+            elif not show_spinner:
+                # If it's a static message, kill any active spinner task
+                self._spinner_active = False
+                if self._spinner_task is not None:
+                    self._spinner_task.cancel()
+                    self._spinner_task = None
             self.app.invalidate()
         else:
             self._spinner_active = False
@@ -617,11 +632,21 @@ class ChatUI:
         return await self._pending_input
 
     async def run(self, worker):
-        self.app.create_background_task(worker())
+        # Wrap the background worker in a supervisor to catch hidden async exceptions
+        async def supervised_worker():
+            try:
+                await worker()
+            except Exception as e:
+                self.set_status("")
+                # Forces prompt_toolkit to exit immediately and raise the error to run_async
+                self.app.exit(exception=e)
+
+        self.app.create_background_task(supervised_worker())
+        
         try:
             await self.app.run_async()
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            # Surface unexpected TUI-level errors without crashing silently
+            # This will now successfully catch background crashes!
             raise RuntimeError(f"ChatUI crashed unexpectedly: {e}") from e
