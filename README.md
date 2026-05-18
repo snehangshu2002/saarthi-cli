@@ -7,9 +7,11 @@ No browser. No Electron. No cloud dashboard.
 
 > Current release: `0.1.0`
 
-[![PyPI version](https://badge.fury.io/py/saarthi-cli.svg)](https://pypi.org/project/saarthi-cli/)
-[![Python](https://img.shields.io/pypi/pyversions/saarthi-cli.svg)](https://pypi.org/project/saarthi-cli/)
-[![GitHub](https://img.shields.io/github/v/release/snehangshu2002/saarthi-cli?label=github)](https://github.com/snehangshu2002/saarthi-cli)
+
+[![PyPI version](https://img.shields.io/pypi/v/saarthi-cli)](https://pypi.org/project/saarthi-cli/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/saarthi-cli)](https://pypi.org/project/saarthi-cli/)
+[![License](https://img.shields.io/github/license/snehangshu2002/saarthi-cli)](https://github.com/snehangshu2002/saarthi-cli/blob/main/LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/snehangshu2002/saarthi-cli)](https://github.com/snehangshu2002/saarthi-cli/releases)
 
 ---
 
