@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from rich.console import Console
 from rich.rule import Rule
 
-from chatbot_cli.app_config import COMMANDS, DATA_DIR, STATUS_MESSAGES
+from chatbot_cli.app_config import COMMANDS, DATA_DIR, STATUS_MESSAGES, USER_DATA_DIR
 from chatbot_cli.chatbot import build_graph
 from chatbot_cli.formatting import format_checkpoint_time, render_messages
 from chatbot_cli.memory import seed_username
@@ -97,7 +97,7 @@ async def run():
             ui.append_block("Welcome back, " + settings["username"] + "!")
             ui.append_block("New session started. Type /help for commands.")
             if created:
-                ui.append_block("mcp_config.json created at project root. Edit it to add MCP servers.")
+                ui.append_block("mcp_config.json created at your data directory. Edit it to add MCP servers.")
             
             async def chat_loop():
                 nonlocal config
