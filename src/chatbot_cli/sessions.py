@@ -1,7 +1,7 @@
 from chatbot_cli.formatting import clip_text, format_checkpoint_time, message_content_text
 
 
-def checkpoint_preview(checkpoint_tuple) -> str:
+def checkpoint_preview(checkpoint_tuple) -> str: # Generates one-line preview text for a saved session.
     channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
     summary = channel_values.get("summary")
     if isinstance(summary, str) and summary.strip():
@@ -18,7 +18,7 @@ def checkpoint_preview(checkpoint_tuple) -> str:
     return "No saved preview"
 
 
-async def list_user_sessions(checkpointer, user_id: str, limit: int = 20) -> list[dict]:
+async def list_user_sessions(checkpointer, user_id: str, limit: int = 10) -> list[dict]: # Lists all user sessions, returns as list of dicts.
     sessions = []
     seen_threads = set()
 
@@ -38,6 +38,6 @@ async def list_user_sessions(checkpointer, user_id: str, limit: int = 20) -> lis
     return sessions[:limit]
 
 
-async def load_thread_snapshot(checkpointer, thread_id: str):
+async def load_thread_snapshot(checkpointer, thread_id: str):# Loads full state of one conversation when user selects it from /resume.
     config = {"configurable": {"thread_id": thread_id}}
     return await checkpointer.aget_tuple(config)
