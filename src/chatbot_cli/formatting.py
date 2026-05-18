@@ -1,7 +1,7 @@
 from datetime import datetime
 
 
-def message_content_text(message) -> str:
+def message_content_text(message) -> str: # Extract text content from message
     content = getattr(message, "content", "")
     if isinstance(message, dict):
         content = message.get("content", "")
@@ -16,7 +16,7 @@ def message_content_text(message) -> str:
     return str(content).strip()
 
 
-def message_role(message) -> str:
+def message_role(message) -> str: # Extract role ("human", "ai", "assistant") from message
     if isinstance(message, dict):
         return str(message.get("role", ""))
     msg_type = getattr(message, "type", "")
@@ -25,21 +25,24 @@ def message_role(message) -> str:
     return type(message).__name__.replace("Message", "").lower()
 
 
-def clip_text(text: str, limit: int = 90) -> str:
+def clip_text(text: str, limit: int = 90) -> str: # Truncate to 90 chars for session preview labels
     compact = " ".join(text.split())
     if len(compact) <= limit:
         return compact
     return compact[: limit - 3].rstrip() + "..."
 
 
-def format_checkpoint_time(ts: str) -> str:
+def format_checkpoint_time(ts: str) -> str: # ISO timestamp
     try:
         return datetime.fromisoformat(ts).astimezone().strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return ts
 
 
-def render_messages(messages: list) -> str:
+def render_messages(messages: list) -> str: # Render messages for display in transcript
+    """
+    Converts full message list → terminal transcript string.
+    """
     blocks = []
     for message in messages:
         role = message_role(message)
@@ -67,6 +70,7 @@ def format_ai_output(text: str) -> str:
 
 
 def strip_code_fences(text: str) -> str:
+    """Remove ```python, ``` lines. Keeps the actual code, drops the markdown wrapper."""
     lines = text.splitlines()
     cleaned = []
     for line in lines:
@@ -76,7 +80,7 @@ def strip_code_fences(text: str) -> str:
     return "\n".join(cleaned).strip("\n")
 
 
-def looks_like_code(text: str) -> bool:
+def looks_like_code(text: str) -> bool: # Heuristic to detect if text is code.
     if "\nclass " in f"\n{text}" or "\ndef " in f"\n{text}":
         return True
     code_markers = (
