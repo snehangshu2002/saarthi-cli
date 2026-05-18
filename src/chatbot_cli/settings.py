@@ -4,13 +4,36 @@ import os
 from prompt_toolkit.shortcuts import input_dialog, message_dialog, radiolist_dialog
 from rich.console import Console
 from rich.rule import Rule
-
+from pathlib import Path
 from chatbot_cli.app_config import SETTINGS_FILE
 from chatbot_cli.providers import SUPPORTED_PROVIDERS
 
 console = Console()
 
+MCP_CONFIG_PATH = Path("mcp_config.json")
+DEFAULT_MCP_CONFIG = {
+    "mcpServers": {
+        "filesystem": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                str(Path.home())   # resolves to C:\Users\SNEHANGSHU on your machine
+                                   # resolves to /home/username on Linux/Mac
+            ],
+            "transport": "stdio"
+        }
+    }
+}
 
+def ensure_mcp_config():
+    """Create mcp_config.json with defaults if it doesn't exist."""
+    if not MCP_CONFIG_PATH.exists():
+        MCP_CONFIG_PATH.write_text(
+            json.dumps(DEFAULT_MCP_CONFIG, indent=2)
+        )
+        return True   # created fresh
+    return False      # already existed
 def load_settings() -> dict: # Read settings.json from disk.
     defaults = {"username": "", "provider": "", "api_key": ""}
     if not os.path.exists(SETTINGS_FILE):
