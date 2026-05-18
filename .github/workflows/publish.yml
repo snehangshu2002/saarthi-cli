@@ -2,11 +2,8 @@ name: Build and Publish to PyPI
 
 on:
   push:
-    branches:
-      - main
-  release:
-    types:
-      - published
+    tags:
+      - "v*"
 
 jobs:
   build:
@@ -32,7 +29,6 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
     permissions:
       id-token: write
       contents: read
