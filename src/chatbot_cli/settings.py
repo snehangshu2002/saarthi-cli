@@ -26,16 +26,25 @@ DEFAULT_MCP_CONFIG = {
     }
 }
 
+
 def ensure_mcp_config():
     """Create mcp_config.json with defaults if it doesn't exist."""
-    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not MCP_CONFIG_PATH.exists():
-        MCP_CONFIG_PATH.write_text(
-            json.dumps(DEFAULT_MCP_CONFIG, indent=2)
-        )
-        return True   # created fresh
-    return False      # already existed
-def load_settings() -> dict: # Read settings.json from disk.
+    try:
+        USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if not MCP_CONFIG_PATH.exists():
+            MCP_CONFIG_PATH.write_text(
+                json.dumps(DEFAULT_MCP_CONFIG, indent=2),
+                encoding="utf-8",
+            )
+            return True   # created fresh
+        return False      # already existed
+    except OSError as e:
+        console.print(f"[yellow]Warning: could not write mcp_config.json — {e}[/]")
+        return False
+
+
+def load_settings() -> dict:
+    """Read settings.json from disk."""
     USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
     defaults = {"username": "", "provider": "", "api_key": ""}
     if not os.path.exists(SETTINGS_FILE):
@@ -50,10 +59,14 @@ def load_settings() -> dict: # Read settings.json from disk.
         return defaults
 
 
-def save_settings(settings: dict) -> None: # Writes settings dict → JSON file.
-    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2)
+def save_settings(settings: dict) -> None:
+    """Write settings dict to JSON file."""
+    try:
+        USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except OSError as e:
+        console.print(f"[red]Error: could not save settings — {e}[/]")
 
 
 def settings_complete(settings: dict) -> bool:
@@ -65,11 +78,24 @@ def settings_complete(settings: dict) -> bool:
     )
 
 
-async def first_run_setup(session) -> dict:
+async def first_run_setup(session, _depth: int = 0) -> dict:
+    """
+    Interactive first-run wizard. Loops on Back, but caps recursion at 10
+    to avoid a stack overflow on repeated cancels.
+    """
+    if _depth > 10:
+        console.print("[red]Too many retries during setup. Exiting.[/]")
+        raise SystemExit(1)
+
     console.print(Rule("[bold cyan]First time setup[/]"))
     console.print("[dim]This runs once. Answers are saved to settings.json.[/]\n")
 
-    username = (await session.prompt_async("Choose a username: ")).strip()
+    try:
+        username = (await session.prompt_async("Choose a username: ")).strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("[yellow]Setup cancelled.[/]")
+        raise SystemExit(0)
+
     if not username:
         username = "default"
 
@@ -108,7 +134,7 @@ async def first_run_setup(session) -> dict:
 
     if api_key is None:
         console.print("[dim]Going back...[/]")
-        return await first_run_setup(session)
+        return await first_run_setup(session, _depth=_depth + 1)
 
     api_key = api_key.strip()
     if not api_key:

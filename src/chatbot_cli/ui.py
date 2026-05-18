@@ -310,7 +310,7 @@ class ChatUI:
         def _(event):
             buffer = event.app.current_buffer
 
-            # 1. If text is highlighted (via Ctrl+Space), copy it!
+            # 1. If text is highlighted (via Ctrl+Space), copy it
             if buffer.selection_state:
                 try:
                     data = buffer.copy_selection()
@@ -318,9 +318,10 @@ class ChatUI:
                     self.set_status("Copied to clipboard!")
                     buffer.exit_selection()
                     self.app.invalidate()
-                    return
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.set_status(f"Copy failed: {e}")
+                    buffer.exit_selection()
+                return
 
             # 2. If no text is highlighted, double-press to exit
             now = time.monotonic()
@@ -621,3 +622,6 @@ class ChatUI:
             await self.app.run_async()
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            # Surface unexpected TUI-level errors without crashing silently
+            raise RuntimeError(f"ChatUI crashed unexpectedly: {e}") from e

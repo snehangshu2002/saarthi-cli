@@ -1,91 +1,196 @@
 # Saarthi CLI
 
-**Your AI copilot in the terminal.** Saarthi is a sophisticated command-line chatbot powered by LangGraph with long-term memory, multiple AI provider support, and an interactive TUI built with prompt-toolkit.
+**Your AI copilot in the terminal.**
 
-> **Note**: This is version 0.1.0 — the first release. More features, improvements, and providers coming soon!
+Saarthi is a command-line chatbot built on LangGraph with long-term memory, multi-provider support, real-time streaming, and an interactive TUI powered by prompt-toolkit. It runs fully inside your terminal — no browser, no Electron, no cloud dashboard.
+
+> Version 0.1.0 — first public release. More providers and features are on the way.
 
 [![PyPI version](https://badge.fury.io/py/saarthi-cli.svg)](https://pypi.org/project/saarthi-cli/)
 [![Python](https://img.shields.io/pypi/pyversions/saarthi-cli.svg)](https://pypi.org/project/saarthi-cli/)
 [![GitHub](https://img.shields.io/github/v/release/snehangshu2002/saarthi-cli?label=github)](https://github.com/snehangshu2002/saarthi-cli)
 
-## Features
+---
 
-- **Multi-Provider Support**: Works with Mistral AI, OpenAI, and Google Gemini
-- **LangGraph Memory**: Persistent long-term memory using SQLite-backed stores
-- **Session Management**: Save and resume conversations across sessions
-- **Streaming Output**: Real-time streaming responses with tool execution visualization
-- **MCP Integration**: Connect external tools via Model Context Protocol servers
-- **Built-in Tools**: Bash execution, calculator, web search (DuckDuckGo), Wikipedia, arXiv
+## What it does
+
+- Keeps a **long-term memory** of things you tell it, stored in a local SQLite database
+- Streams responses token by token with a live spinner and tool-call visualisation
+- Connects to external services via **MCP (Model Context Protocol)** servers
+- Ships five **built-in tools**: bash/Python execution, calculator, DuckDuckGo search, Wikipedia, and arXiv
+- Saves and restores **named sessions** so you can pick up any conversation later
+- Works with **Mistral AI**, **OpenAI**, and **Google Gemini** — you choose at setup
+
+---
 
 ## Requirements
 
-- Python 3.12+
-- API key for one of the supported providers (Mistral, OpenAI, or Google)
+- Python 3.12 or newer
+- An API key for at least one supported provider
 
-## Quickstart
+---
+
+## Installation
 
 ```bash
-# Install via pip (from PyPI when published)
 pip install saarthi-cli
+```
 
-# Or one-line installer (when published)
-curl -fsSL https://raw.githubusercontent.com/snehangshu2002/saarthi-cli/main/install.sh | bash
+Then run it:
 
-# Run
+```bash
 saarthi
 ```
 
-## First-Time Setup
+### Install from source
 
-On first run, you'll be prompted to:
-1. Choose a username
-2. Select an AI provider (Mistral, OpenAI, or Google)
-3. Enter your API key
+```bash
+git clone https://github.com/snehangshu2002/saarthi-cli.git
+cd saarthi-cli
+uv sync
+uv run python main.py
+```
 
-Settings and data are stored in your user data directory:
-- **Windows**: `%LOCALAPPDATA%\saarthi\`
-- **Linux/Mac**: `~/.local/share/saarthi/`
+---
+
+## First-time setup
+
+On first run, Saarthi walks you through a three-step wizard:
+
+1. Pick a username
+2. Choose a provider (Mistral, OpenAI, or Google)
+3. Paste your API key (input is hidden)
+
+Settings are written to `settings.json` in your data directory and reused on every subsequent launch. You can edit this file directly or re-run setup with `/settings`.
+
+**Where data is stored:**
+
+| Platform | Path |
+|----------|------|
+| Windows | `%LOCALAPPDATA%\saarthi\` |
+| Linux / Mac | `~/.local/share/saarthi/` |
+
+This directory holds `settings.json`, `mcp_config.json`, and the SQLite memory database.
+
+---
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `/help` | Show all available commands |
+| Command | What it does |
+|---------|--------------|
+| `/help` | List all commands |
 | `/new` | Start a fresh conversation |
-| `/resume` | Restore a previous conversation |
-| `/exit` | Quit the chatbot |
-| `/settings` | Display current configuration |
-| `/mcp` | List connected MCP servers and tools |
+| `/resume` | Pick up a saved conversation |
+| `/settings` | Show current configuration |
+| `/mcp` | List connected MCP servers and their tools |
+| `/exit` | Quit |
 
-### Text Selection & Copying
+### Copying text
 
-- **Mouse**: Hold `Shift`, click and drag to highlight, right-click or `Ctrl+C` to copy
-- **Keyboard**: `Ctrl+Space` to start selection, arrow keys to expand, `Ctrl+C` to copy
+| Method | Steps |
+|--------|-------|
+| Mouse | Hold `Shift`, click and drag to highlight, then right-click or `Ctrl+C` |
+| Keyboard | `Ctrl+Space` to start selection, arrow keys to extend, `Ctrl+C` to copy |
 
-## Project Structure
+---
+
+## Built-in tools
+
+| Tool | Description |
+|------|-------------|
+| `bash` | Run shell commands or Python snippets (30 s timeout) |
+| `calculator` | Evaluate maths expressions |
+| `ddg_tool` | DuckDuckGo web search |
+| `wiki_tool` | Wikipedia article lookup |
+| `arxiv_tool` | arXiv paper search |
+
+---
+
+## MCP servers
+
+Saarthi can connect to any MCP-compatible server. A default `mcp_config.json` is created on first run with the filesystem server enabled.
+
+**Config location:**
+
+| Platform | Path |
+|----------|------|
+| Windows | `%LOCALAPPDATA%\saarthi\mcp_config.json` |
+| Linux / Mac | `~/.local/share/saarthi/mcp_config.json` |
+
+Edit this file to add more servers:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "transport": "stdio"
+    },
+    "my-custom-server": {
+      "command": "python",
+      "args": ["-m", "my_mcp_server"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+Any server that speaks the MCP STDIO transport works here.
+
+---
+
+## Architecture
+
+Saarthi uses a LangGraph state machine. Each user message passes through these nodes in order:
+
+```
+user input
+    │
+    ▼
+ chat           ← calls the LLM with conversation history + user memories
+    │
+    ▼ (if tools called)
+ tools          ← executes tool calls in parallel
+    │
+    ▼
+ tool_followup  ← sends tool results back to the LLM for a follow-up reply
+    │
+    ▼ (every N turns)
+ summarize      ← compresses old history to keep the context window manageable
+    │
+    ▼
+ remember       ← extracts facts about the user and writes them to long-term memory
+```
+
+Memory is backed by a local SQLite store (via LangGraph's built-in checkpointer). Sessions are identified by a thread ID, so you can have multiple independent conversations running.
+
+---
+
+## Project layout
 
 ```
 .
-├── src/chatbot_cli/        Application package
-│   ├── __init__.py         Package init
-│   ├── app.py              Main entry point and chat loop
-│   ├── app_config.py       Configuration constants and styles
-│   ├── chatbot.py          LangGraph graph definition with memory nodes
-│   ├── streaming.py        Response streaming logic
-│   ├── ui.py               prompt-toolkit TUI components
-│   ├── tool.py             Built-in tools (bash, calculator, search)
-│   ├── mcp_client.py       MCP server integration
-│   ├── providers.py        Multi-provider model initialization
-│   ├── settings.py         User settings management
-│   ├── memory.py           Memory utilities
-│   └── sessions.py         Session listing and loading
-├── notebooks/              Experiments and scratch notebooks
-├── main.py                 Local development launcher
-├── pyproject.toml          Package configuration
-└── README.md               This file
+├── src/chatbot_cli/
+│   ├── app.py           Main entry point and chat loop
+│   ├── app_config.py    Constants, styles, and command definitions
+│   ├── chatbot.py       LangGraph graph definition
+│   ├── streaming.py     Token-streaming and tool-call rendering
+│   ├── ui.py            prompt-toolkit TUI (layout, key bindings, transcript)
+│   ├── tool.py          Built-in tools
+│   ├── mcp_client.py    MCP server connection and tool discovery
+│   ├── providers.py     Lazy provider imports (Mistral / OpenAI / Google)
+│   ├── settings.py      Settings load/save and first-run wizard
+│   ├── memory.py        Memory extraction helpers
+│   ├── sessions.py      Session listing and resume logic
+│   └── clipboard.py     Windows clipboard integration
+├── notebooks/           Scratch notebooks
+├── main.py              Local dev launcher
+├── pyproject.toml       Package config
+└── README.md
 ```
 
-**Data directory**: `%LOCALAPPDATA%\saarthi\` (Windows) or `~/.local/share/saarthi/` (Linux/Mac) contains `settings.json`, `mcp_config.json`, and SQLite databases.
+---
 
 ## Development
 
@@ -95,83 +200,53 @@ git clone https://github.com/snehangshu2002/saarthi-cli.git
 cd saarthi-cli
 uv sync
 
-# Run from source
+# Run
 uv run python main.py
 ```
 
-**Note**: When running from source, settings and data are stored in your user data directory (`%LOCALAPPDATA%\saarthi\` on Windows, `~/.local/share/saarthi/` on Linux/Mac), not in the project directory.
+---
 
-## Building & Publishing
+## Building and publishing
 
 ```bash
-# Build the package
+# Build
 uv build
 
-# Upload to PyPI (requires account)
+# Publish to PyPI
 uv publish
 
-# Or using twine
+# Or with twine
 uv build
 twine upload dist/*
 ```
 
+---
+
 ## Changelog
 
 ### 0.1.0 (2026-05-18)
+
 - Initial release
-- LangGraph-powered CLI with long-term memory
-- Multi-provider support (Mistral, OpenAI, Google)
-- Session management and resume functionality
-- MCP server integration
-- Built-in tools: bash, calculator, web search, Wikipedia, arXiv
+- LangGraph-powered CLI with long-term memory (SQLite)
+- Multi-provider support: Mistral AI, OpenAI, Google Gemini
+- Real-time streaming with tool-call visualisation
+- Session save and resume
+- MCP server integration (STDIO transport)
+- Built-in tools: bash, calculator, DuckDuckGo, Wikipedia, arXiv
+- First-run setup wizard with masked API key input
 
-## MCP Servers
-
-The chatbot can connect to external MCP servers. A default `mcp_config.json` is created in your data directory on first run with the filesystem server enabled. Edit this file to add more servers.
-
-**Location**: 
-- Windows: `%LOCALAPPDATA%\saarthi\mcp_config.json`
-- Linux/Mac: `~/.local/share/saarthi/mcp_config.json`
-
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
-    }
-  }
-}
-```
-
-## Built-in Tools
-
-| Tool | Description |
-|------|-------------|
-| `bash` | Execute shell commands or Python code (30s timeout) |
-| `calculator` | Evaluate mathematical expressions |
-| `ddg_tool` | DuckDuckGo web search |
-| `wiki_tool` | Wikipedia article lookup |
-| `arxiv_tool` | arXiv paper search |
-
-## Architecture
-
-The chatbot uses a LangGraph state machine with the following nodes:
-
-1. **chat** - Calls the LLM with conversation history and user memories
-2. **tools** - Executes tool calls from the LLM response
-3. **tool_followup** - Processes tool results and generates follow-up response
-4. **summarize** - Compresses conversation history to maintain context window
-5. **remember** - Extracts and persists user facts to long-term memory
+---
 
 ## Roadmap
 
-- [ ] Additional AI providers (Anthropic, Cohere, local models)
-- [ ] Custom tool plugins
-- [ ] Conversation export/import
-- [ ] Shell command auto-detection and suggestions
-- [ ] Multi-line conversation history navigation
-- [ ] Theme customization
+- Anthropic Claude, Cohere, and local model support
+- Custom tool plugins
+- Conversation export and import
+- Shell command auto-detection
+- Multi-line history navigation
+- Theme customisation
+
+---
 
 ## License
 
