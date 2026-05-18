@@ -1,4 +1,4 @@
-from langchain_tavily import TavilySearch
+# from langchain_tavily import TavilySearch
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.utilities import WikipediaAPIWrapper
 from langchain_community.tools import WikipediaQueryRun
@@ -65,7 +65,7 @@ def calculator(expression: str) -> str:
 
 # ── Search / knowledge tools ───────────────────────────────────────────────
 
-tavily_tool = TavilySearch(max_results=1)
+# tavily_tool = TavilySearch(max_results=1)
 ddg_tool    = DuckDuckGoSearchRun()
 wiki_tool   = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
 arxiv_tool  = ArxivQueryRun(api_wrapper=ArxivAPIWrapper())
@@ -77,7 +77,7 @@ async def build_tools():
     normal_list = [
         bash,
         calculator,
-        tavily_tool,
+        # tavily_tool,
         ddg_tool,
         wiki_tool,
         arxiv_tool,
