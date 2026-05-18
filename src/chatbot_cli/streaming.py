@@ -11,10 +11,10 @@ async def stream_response(graph, user_input: str, config: dict, ui) -> str:
         stream_mode="messages",
     ):
         if (
-            metadata.get("langgraph_node") == "chat"
-            and isinstance(chunk, AIMessageChunk)
-            and isinstance(chunk.content, str)
-            and chunk.content
+            metadata.get("langgraph_node") == "chat" # only from chat node, not remember/summarize
+            and isinstance(chunk, AIMessageChunk) # # only AI response chunks
+            and isinstance(chunk.content, str) ## content must be string, not tool-use list
+            and chunk.content ## ignore empty chunks
         ):
             if not full_text:
                 ui.set_status("")
