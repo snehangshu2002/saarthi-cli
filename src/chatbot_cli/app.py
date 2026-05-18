@@ -18,7 +18,9 @@ from chatbot_cli.settings import first_run_setup, load_settings, settings_comple
 from chatbot_cli.streaming import stream_response
 from chatbot_cli.ui import ChatUI, create_chat_session
 from chatbot_cli.settings import ensure_mcp_config
+from chatbot_cli.tool import build_tools
 console = Console()
+
 
 
 def start_new_conversation(user_id: str) -> dict:
@@ -31,7 +33,7 @@ async def run():
     session = create_chat_session()
     created = ensure_mcp_config()
     console.print(Rule("[bold cyan]Chatbot[/]"))
-
+    tools = await build_tools()
     settings = load_settings()
     if not settings_complete(settings):
         settings = await first_run_setup(session)
@@ -56,7 +58,12 @@ async def run():
         ) as store:
             await store.setup()
 
-            graph = build_graph(model, checkpointer, store)
+            graph = build_graph(
+                model=model,
+                checkpointer=checkpointer,
+                store=store,
+                tools=tools,
+            )
             await seed_username(store, user_id)
 
             ui = ChatUI()
@@ -162,11 +169,36 @@ async def run():
                         )
                         continue
 
+                    if user_input == "/mcp":
+                        lines = ["Connected MCP servers and tools:"]
+                        mcp_tool_names = [
+                            t.name for t in tools
+                            if hasattr(t, "_is_mcp") or "mcp" in getattr(t, "name", "").lower()
+                            or getattr(t, "tags", None) and "mcp" in (getattr(t, "tags", None) or [])
+                        ]
+                        # Separate built-in from MCP tools
+                        builtin_names = {"bash", "calculator", "tavily-search", "duckduckgo-search",
+                                         "wikipedia", "arxiv"}
+                        mcp_tools_list = [t for t in tools if t.name not in builtin_names]
+                        builtin_list   = [t for t in tools if t.name in builtin_names]
+                        if mcp_tools_list:
+                            for t in mcp_tools_list:
+                                desc = (getattr(t, "description", "") or "").splitlines()[0][:60]
+                                lines.append(f"  [MCP] {t.name}  —  {desc}")
+                        else:
+                            lines.append("  (no MCP servers connected — edit mcp_config.json)")
+                        lines.append("")
+                        lines.append("Built-in tools:")
+                        for t in builtin_list:
+                            lines.append(f"  {t.name}")
+                        ui.append_block("\n".join(lines))
+                        continue
+
+
+
                     if user_input.startswith("/"):
                         ui.append_block(f"Unknown command: {user_input}. Type /help.")
                         continue
-
-                    ui.set_status(random.choice(STATUS_MESSAGES))
                     try:
                         await stream_response(graph, user_input, config, ui)
                     finally:
