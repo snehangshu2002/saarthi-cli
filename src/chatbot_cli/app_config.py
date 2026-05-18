@@ -30,6 +30,11 @@ APP_STYLE = Style.from_dict(
         "status": "#ff8c00",
         "input": "",
         "user-line": "bg:#2a2a2a #ffffff",
+        # Tool block rendering
+        "tool-header": "#5fd7ff bold",        # bright cyan header line
+        "tool-hint": "#555555 italic",         # dim grey "Ctrl+T to see full" hint
+        "tool-separator": "#333333",           # dim separator lines
+        # Completion menu
         "completion-menu": "bg:default",
         "completion-menu.completion": "bg:default",
         "completion-menu.completion.current": "reverse",
