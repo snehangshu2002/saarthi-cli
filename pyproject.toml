@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,11 +8,21 @@ version = "0.1.0"
 description = "Your AI copilot in the terminal - a LangGraph-powered CLI chatbot with long-term memory"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+
+license = { text = "MIT" }
+
 authors = [
-    {name = "Snehangshu Bhuin", email = "snehangshu.dev@gmail.com"}
+    { name = "Snehangshu Bhuin", email = "snehangshu.dev@gmail.com" }
 ]
-keywords = ["ai", "chatbot", "cli", "langgraph", "terminal"]
+
+keywords = [
+    "ai",
+    "chatbot",
+    "cli",
+    "langgraph",
+    "terminal"
+]
+
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -23,11 +33,12 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+
 dependencies = [
     "aiosqlite>=0.22.1",
     "arxiv>=4.0.0",
     "ddgs>=9.14.4",
-    "dotenv>=0.9.9",
+    "python-dotenv>=1.1.1",
     "langchain>=1.2.18",
     "langchain-community>=0.4.1",
     "langchain-mcp-adapters>=0.2.2",
@@ -39,7 +50,6 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
     "pyfiglet>=1.0.4",
     "rich>=15.0.0",
-    "typing>=3.10.0.0",
     "wikipedia>=1.4.0",
 ]
 
@@ -61,6 +71,9 @@ dev = [
     "mypy>=1.10.0",
 ]
 
+[tool.setuptools]
+package-dir = { "" = "src" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -71,5 +84,3 @@ target-version = ["py312"]
 [tool.ruff]
 line-length = 88
 target-version = "py312"
-
-
