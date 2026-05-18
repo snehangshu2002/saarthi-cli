@@ -3,11 +3,26 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "chatbot-cli"
+name = "saarthi-cli"
 version = "0.1.0"
-description = "Terminal chatbot with LangGraph memory and multiple model providers"
+description = "Your AI copilot in the terminal - a LangGraph-powered CLI chatbot with long-term memory"
 readme = "README.md"
 requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Snehangshu Bhuin", email = "snehangshu.dev@gmail.com"}
+]
+keywords = ["ai", "chatbot", "cli", "langgraph", "terminal"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "aiosqlite>=0.22.1",
     "arxiv>=4.0.0",
@@ -29,6 +44,32 @@ dependencies = [
 ]
 
 [project.scripts]
-chatbot-cli = "chatbot_cli.app:main"
+saarthi = "chatbot_cli.app:main"
+
+[project.urls]
+Homepage = "https://github.com/snehangshu2002/saarthi-cli"
+Repository = "https://github.com/snehangshu2002/saarthi-cli"
+Documentation = "https://github.com/snehangshu2002/saarthi-cli#readme"
+Issues = "https://github.com/snehangshu2002/saarthi-cli/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
 
 
