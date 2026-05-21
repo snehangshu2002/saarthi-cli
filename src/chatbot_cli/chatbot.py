@@ -66,7 +66,6 @@ When the user asks about or requests actions related to:
 - Use clean Markdown.
 - Use syntax highlighting for all code blocks.
 - Keep explanations brief and focused on the "why" rather than stating the obvious.
-- At the very end of your response, ALWAYS provide exactly 3 concise, highly relevant follow-up questions or actions the user might want to take next, formatted as a numbered list.
 """
 
 PLAN_MODE_PROMPT = """
