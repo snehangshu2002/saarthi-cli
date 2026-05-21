@@ -17,7 +17,7 @@ No browser. No Electron. No cloud dashboard.
 
 ## Demo
 
-![Saarthi CLI demo](https://raw.githubusercontent.com/snehangshu2002/saarthi-cli/main/img/temp.png)
+![Saarthi CLI demo](https://raw.githubusercontent.com/snehangshu2002/saarthi-cli/main/img/temp1.png)
 
 ---
 
