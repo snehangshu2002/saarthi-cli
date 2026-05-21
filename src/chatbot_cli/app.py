@@ -389,6 +389,115 @@ async def run():
 
 
 
+                    if user_input == "/skills":
+                        from chatbot_cli.tool import load_skill_tools
+                        from pathlib import Path
+                        skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
+                        skill_files = sorted(skills_dir.glob("*.py")) if skills_dir.exists() else []
+                        if not skill_files:
+                            ui.append_block("No skills saved yet. Ask the AI to create one using save_skill, or run /help for usage.")
+                        else:
+                            lines = [f"Saved skills ({len(skill_files)}):"]
+                            for sf in skill_files:
+                                try:
+                                    import ast
+                                    code = sf.read_text(encoding="utf-8")
+                                    tree = ast.parse(code)
+                                    doc = ast.get_docstring(tree) or "(no description)"
+                                    short_doc = doc.splitlines()[0][:70]
+                                    lines.append(f"  skill_{sf.stem}  —  {short_doc}")
+                                except Exception:
+                                    lines.append(f"  skill_{sf.stem}  —  (could not read description)")
+                            lines.append("")
+                            lines.append("Use /skill run <name> [args] to execute a skill.")
+                            lines.append("Use /skill show <name> to see its source code.")
+                            lines.append("Use /skill delete <name> to remove it.")
+                            ui.append_block("\n".join(lines))
+                        continue
+
+                    if user_input.startswith("/skill "):
+                        parts = user_input.split(maxsplit=2)
+                        subcommand = parts[1] if len(parts) > 1 else ""
+
+                        if subcommand == "run":
+                            if len(parts) < 3:
+                                ui.append_block("Usage: /skill run <name> [args...]")
+                                continue
+                            rest = parts[2]
+                            run_parts = rest.split(maxsplit=1)
+                            skill_name = run_parts[0]
+                            skill_args = run_parts[1] if len(run_parts) > 1 else ""
+
+                            from pathlib import Path
+                            skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
+                            skill_file = skills_dir / f"{skill_name}.py"
+
+                            if not skill_file.exists():
+                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
+                            else:
+                                import subprocess
+                                import sys
+                                import shlex
+                                cmd = [sys.executable, str(skill_file)]
+                                if skill_args:
+                                    cmd.extend(shlex.split(skill_args))
+                                try:
+                                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                                    output = (result.stdout or "") + (result.stderr or "")
+                                    ui.append_block(f"skill_{skill_name}({skill_args}):\n{output.strip() or '(no output)'}")
+                                except subprocess.TimeoutExpired:
+                                    ui.append_block(f"Skill '{skill_name}' timed out after 30 seconds.")
+                                except Exception as e:
+                                    ui.append_block(f"Error running skill '{skill_name}': {e}")
+                            continue
+
+                        elif subcommand == "show":
+                            if len(parts) < 3:
+                                ui.append_block("Usage: /skill show <name>")
+                                continue
+                            skill_name = parts[2].strip()
+                            from pathlib import Path
+                            skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
+                            skill_file = skills_dir / f"{skill_name}.py"
+
+                            if not skill_file.exists():
+                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
+                            else:
+                                try:
+                                    code = skill_file.read_text(encoding="utf-8")
+                                    ui.append_block(f"Source of skill_{skill_name} ({skill_file.name}):\n\n{code}")
+                                except Exception as e:
+                                    ui.append_block(f"Error reading skill '{skill_name}': {e}")
+                            continue
+
+                        elif subcommand == "delete":
+                            if len(parts) < 3:
+                                ui.append_block("Usage: /skill delete <name>")
+                                continue
+                            skill_name = parts[2].strip()
+                            from pathlib import Path
+                            skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
+                            skill_file = skills_dir / f"{skill_name}.py"
+
+                            if not skill_file.exists():
+                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
+                            else:
+                                try:
+                                    skill_file.unlink()
+                                    ui.append_block(f"Skill '{skill_name}' deleted successfully.")
+                                except Exception as e:
+                                    ui.append_block(f"Error deleting skill '{skill_name}': {e}")
+                            continue
+
+                        else:
+                            ui.append_block(
+                                "Unknown /skill subcommand. Available:\n"
+                                "  /skill run <name> [args]  — Run a skill\n"
+                                "  /skill show <name>         — View source code\n"
+                                "  /skill delete <name>       — Delete a skill"
+                            )
+                            continue
+
                     if user_input.startswith("/"):
                         ui.append_block(f"Unknown command: {user_input}. Type /help.")
                         continue
