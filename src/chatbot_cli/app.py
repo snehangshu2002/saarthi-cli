@@ -262,6 +262,12 @@ async def run():
                             except Exception as err:
                                 ui.append_block(f"Failed to switch model: {err}")
                             continue
+                            
+                        elif mode == "skill":
+                            skill_name = selected["value"]
+                            ui.input.buffer.insert_text(f"/skill run {skill_name} ")
+                            ui.app.layout.focus(ui.input)
+                            continue
 
                     ui.append_block(f"> {user_input}")
 
@@ -495,28 +501,61 @@ async def run():
 
                     if user_input == "/skills":
                         from chatbot_cli.tool import load_skill_tools
-                        from pathlib import Path
-                        skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
-                        skill_files = sorted(skills_dir.glob("*.py")) if skills_dir.exists() else []
+                        from chatbot_cli.app_config import SKILLS_DIR
+                        if SKILLS_DIR.exists():
+                            skill_files = sorted(list(SKILLS_DIR.glob("*.py")) + list(SKILLS_DIR.glob("*.md")))
+                        else:
+                            skill_files = []
                         if not skill_files:
                             ui.append_block("No skills saved yet. Ask the AI to create one using save_skill, or run /help for usage.")
                         else:
-                            lines = [f"Saved skills ({len(skill_files)}):"]
+                            dialog_values = []
                             for sf in skill_files:
-                                try:
-                                    import ast
-                                    code = sf.read_text(encoding="utf-8")
-                                    tree = ast.parse(code)
-                                    doc = ast.get_docstring(tree) or "(no description)"
-                                    short_doc = doc.splitlines()[0][:70]
-                                    lines.append(f"  skill_{sf.stem}  —  {short_doc}")
-                                except Exception:
-                                    lines.append(f"  skill_{sf.stem}  —  (could not read description)")
-                            lines.append("")
-                            lines.append("Use /skill run <name> [args] to execute a skill.")
-                            lines.append("Use /skill show <name> to see its source code.")
-                            lines.append("Use /skill delete <name> to remove it.")
-                            ui.append_block("\n".join(lines))
+                                if sf.suffix == ".py":
+                                    try:
+                                        import ast
+                                        code = sf.read_text(encoding="utf-8")
+                                        tree = ast.parse(code)
+                                        doc = ast.get_docstring(tree) or "(no description)"
+                                        short_doc = doc.splitlines()[0][:70]
+                                        dialog_values.append({"label": f"skill_{sf.stem}  —  {short_doc}", "value": sf.stem})
+                                    except Exception:
+                                        dialog_values.append({"label": f"skill_{sf.stem}  —  (could not read description)", "value": sf.stem})
+                                elif sf.suffix == ".md":
+                                    try:
+                                        import re
+                                        content = sf.read_text(encoding="utf-8").strip()
+                                        content_no_fm = re.sub(r"^---\n.*?\n---\n", "", content, flags=re.DOTALL)
+                                        
+                                        desc = ""
+                                        fm_match = re.match(r"^---\n(.*?)\n---", content, flags=re.DOTALL)
+                                        if fm_match:
+                                            for line in fm_match.group(1).split('\n'):
+                                                if line.startswith("description:"):
+                                                    desc = line.split(":", 1)[1].strip()
+                                                    if desc == "|":
+                                                        desc = ""
+                                                    break
+                                                    
+                                        if not desc:
+                                            for line in content_no_fm.split('\n'):
+                                                line = line.strip()
+                                                if line and not line.startswith('---'):
+                                                    desc = line.lstrip('#').strip()
+                                                    break
+                                                    
+                                        desc = desc or "(no description)"
+                                        short_doc = desc[:70] + ("..." if len(desc) > 70 else "")
+                                        dialog_values.append({"label": f"skill_{sf.stem} [MD] — {short_doc}", "value": sf.stem})
+                                    except Exception:
+                                        dialog_values.append({"label": f"skill_{sf.stem} [MD]", "value": sf.stem})
+                            
+                            active_selection_mode = "skill"
+                            ui.start_selection(
+                                f"Saved skills ({len(skill_files)}):",
+                                dialog_values,
+                                "Use Up/Down to select a skill to run, Enter to select. Esc cancels."
+                            )
                         continue
 
                     if user_input.startswith("/skill "):
@@ -532,46 +571,62 @@ async def run():
                             skill_name = run_parts[0]
                             skill_args = run_parts[1] if len(run_parts) > 1 else ""
 
-                            from pathlib import Path
-                            skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
-                            skill_file = skills_dir / f"{skill_name}.py"
+                            from chatbot_cli.app_config import SKILLS_DIR
+                            skill_py = SKILLS_DIR / f"{skill_name}.py"
+                            skill_md = SKILLS_DIR / f"{skill_name}.md"
+                            skill_md = skills_dir / f"{skill_name}.md"
 
-                            if not skill_file.exists():
-                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
-                            else:
+                            if skill_py.exists():
                                 import subprocess
                                 import sys
-                                import shlex
-                                cmd = [sys.executable, str(skill_file)]
-                                if skill_args:
-                                    cmd.extend(shlex.split(skill_args))
+                                cmd = [sys.executable, str(skill_py)]
                                 try:
-                                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                                    # Pass the arguments via stdin to preserve all formatting and avoid command line limits
+                                    result = subprocess.run(cmd, input=skill_args, capture_output=True, text=True, timeout=30)
                                     output = (result.stdout or "") + (result.stderr or "")
-                                    ui.append_block(f"skill_{skill_name}({skill_args}):\n{output.strip() or '(no output)'}")
+                                    # Trim the output for display
+                                    ui.append_block(f"skill_{skill_name} output:\n{output.strip() or '(no output)'}")
                                 except subprocess.TimeoutExpired:
                                     ui.append_block(f"Skill '{skill_name}' timed out after 30 seconds.")
                                 except Exception as e:
                                     ui.append_block(f"Error running skill '{skill_name}': {e}")
-                            continue
+                                continue
+                            elif skill_md.exists():
+                                try:
+                                    skill_content = skill_md.read_text(encoding="utf-8")
+                                    user_input = f"Skill context/instructions:\n<skill_prompt>\n{skill_content}\n</skill_prompt>\n\nPlease apply the skill instructions above to the following input:\n{skill_args}"
+                                    ui.append_block(f"⚙️ Running MD skill '{skill_name}'...")
+                                    # Do not continue, fall through so stream_response will execute the LLM call
+                                except Exception as e:
+                                    ui.append_block(f"Error reading MD skill '{skill_name}': {e}")
+                                    continue
+                            else:
+                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
+                                continue
 
                         elif subcommand == "show":
                             if len(parts) < 3:
                                 ui.append_block("Usage: /skill show <name>")
                                 continue
                             skill_name = parts[2].strip()
-                            from pathlib import Path
-                            skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
-                            skill_file = skills_dir / f"{skill_name}.py"
+                            from chatbot_cli.app_config import SKILLS_DIR
+                            skill_py = SKILLS_DIR / f"{skill_name}.py"
+                            skill_md = SKILLS_DIR / f"{skill_name}.md"
 
-                            if not skill_file.exists():
-                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
-                            else:
+                            if skill_py.exists():
                                 try:
-                                    code = skill_file.read_text(encoding="utf-8")
-                                    ui.append_block(f"Source of skill_{skill_name} ({skill_file.name}):\n\n{code}")
+                                    code = skill_py.read_text(encoding="utf-8")
+                                    ui.append_block(f"Source of skill_{skill_name} ({skill_py.name}):\n\n{code}")
                                 except Exception as e:
                                     ui.append_block(f"Error reading skill '{skill_name}': {e}")
+                            elif skill_md.exists():
+                                try:
+                                    code = skill_md.read_text(encoding="utf-8")
+                                    ui.append_block(f"Source of skill_{skill_name} ({skill_md.name}):\n\n{code}")
+                                except Exception as e:
+                                    ui.append_block(f"Error reading skill '{skill_name}': {e}")
+                            else:
+                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
                             continue
 
                         elif subcommand == "delete":
@@ -581,25 +636,27 @@ async def run():
                             skill_name = parts[2].strip()
                             from pathlib import Path
                             skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
-                            skill_file = skills_dir / f"{skill_name}.py"
+                            skill_py = skills_dir / f"{skill_name}.py"
+                            skill_md = skills_dir / f"{skill_name}.md"
 
-                            if not skill_file.exists():
-                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
-                            else:
+                            if skill_py.exists():
                                 try:
-                                    skill_file.unlink()
+                                    skill_py.unlink()
                                     ui.append_block(f"Skill '{skill_name}' deleted successfully.")
                                 except Exception as e:
                                     ui.append_block(f"Error deleting skill '{skill_name}': {e}")
+                            elif skill_md.exists():
+                                try:
+                                    skill_md.unlink()
+                                    ui.append_block(f"MD Skill '{skill_name}' deleted successfully.")
+                                except Exception as e:
+                                    ui.append_block(f"Error deleting MD skill '{skill_name}': {e}")
+                            else:
+                                ui.append_block(f"Skill '{skill_name}' not found. Use /skills to list available skills.")
                             continue
 
                         else:
-                            ui.append_block(
-                                "Unknown /skill subcommand. Available:\n"
-                                "  /skill run <name> [args]  — Run a skill\n"
-                                "  /skill show <name>         — View source code\n"
-                                "  /skill delete <name>       — Delete a skill"
-                            )
+                            ui.append_block("Unknown /skill subcommand.")
                             continue
 
                     if user_input == "/image":
