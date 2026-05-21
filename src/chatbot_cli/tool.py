@@ -452,8 +452,15 @@ async def build_tools():
             # Graceful fallback if anything fails (e.g. settings file corrupt or import fails)
             pass
             
-        mcp_tools = await get_mcp_tools()
-        _CACHED_BASE_TOOLS = normal_list + mcp_tools
+        try:
+            mcp_tools = await get_mcp_tools()
+            _CACHED_BASE_TOOLS = normal_list + mcp_tools
+        except Exception as e:
+            if ACTIVE_CHAT_UI:
+                ACTIVE_CHAT_UI.append_block(f"[red]Error loading MCP servers:[/] {e}")
+            else:
+                print(f"Error loading MCP servers: {e}")
+            _CACHED_BASE_TOOLS = normal_list
         
     # Dynamically discover and append user-defined skills
     skill_tools = load_skill_tools()
