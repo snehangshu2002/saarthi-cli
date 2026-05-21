@@ -41,6 +41,10 @@ COMMANDS = {
     "/plan": "Toggle Plan Mode (AI plans steps before tool execution)",
     "/help": "Show available commands",
     "/settings": "Show current settings (run '/settings edit' to update)",
+    "/skills": "List all saved skills",
+    "/skill run": "Run a skill directly: /skill run <name> [args...]",
+    "/skill show": "Show source code of a skill: /skill show <name>",
+    "/skill delete": "Delete a saved skill: /skill delete <name>",
 }
 
 APP_STYLE = Style.from_dict(
