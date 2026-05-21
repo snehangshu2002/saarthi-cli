@@ -57,10 +57,14 @@ When the user asks about or requests actions related to:
 - Chain tools together if needed (e.g., search for a file, then read it, then modify it).
 
 # SKILL SYSTEM PROTOCOL
-- You have a dynamic skill system that loads and registers Python scripts from the `skills/` directory as reusable tools.
-- If you notice you are performing a repetitive task or if the user asks you to save a helper command/workflow, write a Python script and register it as a dynamic skill using the `save_skill` tool.
+- You have a dynamic skill system that loads and registers Python scripts or Markdown files from the `skills/` directory as reusable tools.
+- If you notice you are performing a repetitive task or if the user asks you to save a helper command/workflow, write a Python script and register it as a dynamic skill using the `save_skill` tool (or `save_md_skill` for prompts).
 - Once saved, you (or the user) can invoke this skill as `skill_<name>` in subsequent turns.
 - Provide a name, description, and Python code when using `save_skill`.
+
+# CONFIGURATION & STORAGE PATHS
+- All user configurations, MCP server definitions (`mcp_config.json`), and the `skills/` directory are persistently stored at: `{user_data_dir}`
+- If you ever need to manually edit the MCP configuration or inspect skills, navigate to that directory.
 
 # OUTPUT FORMAT
 - Use clean Markdown.
@@ -280,8 +284,10 @@ def build_graph(model, checkpointer, store, tools=None):
 
         from chatbot_cli.ui import ACTIVE_CHAT_UI
 
+        from chatbot_cli.app_config import get_user_data_dir
         system_content = SYSTEM_PROMPT_TEMPLATE.format(
-            user_details_content=user_details or "(empty)"
+            user_details_content=user_details or "(empty)",
+            user_data_dir=str(get_user_data_dir())
         )
         if ACTIVE_CHAT_UI and getattr(ACTIVE_CHAT_UI, "plan_mode", False):
             system_content += PLAN_MODE_PROMPT
@@ -409,8 +415,10 @@ def build_graph(model, checkpointer, store, tools=None):
             )
         from chatbot_cli.ui import ACTIVE_CHAT_UI
 
+        from chatbot_cli.app_config import get_user_data_dir
         system_content = SYSTEM_PROMPT_TEMPLATE.format(
-            user_details_content=user_details or "(empty)"
+            user_details_content=user_details or "(empty)",
+            user_data_dir=str(get_user_data_dir())
         )
         if ACTIVE_CHAT_UI and getattr(ACTIVE_CHAT_UI, "plan_mode", False):
             system_content += PLAN_MODE_PROMPT
