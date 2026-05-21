@@ -318,10 +318,57 @@ class TranscriptProcessor(Processor):
             return Transformation([(gradient_map.get(marker, "fg:#ffffff"), clean_text)])
             
         elif line_text.startswith("⏱"):
-            return Transformation([("fg:#ffaa00", line_text)])
+            fragments = [("fg:#ffaa00", line_text)]
 
-        return Transformation(fragments)
+        # Apply clickable file path highlighting to the resulting fragments
+        return Transformation(self._apply_file_links(fragments))
 
+    def _apply_file_links(self, fragments):
+        import re
+        import os
+        
+        # Regex to match absolute Windows paths (C:\...) and Linux/macOS absolute paths
+        FILE_PATH_REGEX = re.compile(
+            r"\b([a-zA-Z]:\\[^ \n\r\t\"\'<>]*[\w\/\\]|[a-zA-Z]:/[^ \n\r\t\"\'<>]*[\w\/\\]|/[a-zA-Z0-9][^ \n\r\t\"\'<>]*[\w\/\\])"
+        )
+        
+        def create_file_opener(filepath):
+            def handler(mouse_event):
+                from prompt_toolkit.mouse_events import MouseEventType, MouseButton
+                if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+                    import webbrowser
+                    try:
+                        if os.name == 'nt':
+                            os.startfile(filepath)
+                        else:
+                            webbrowser.open("file://" + filepath)
+                    except Exception:
+                        pass
+                return None
+            return handler
+
+        new_fragments = []
+        for frag in fragments:
+            style = frag[0]
+            text = frag[1]
+            if len(frag) >= 3:
+                # Already has a mouse handler
+                new_fragments.append(frag)
+                continue
+                
+            parts = FILE_PATH_REGEX.split(text)
+            for i, part in enumerate(parts):
+                if not part:
+                    continue
+                if i % 2 == 1:
+                    # Matched file path
+                    opener = create_file_opener(part)
+                    # Add an underline and a noticeable color, plus the mouse handler
+                    link_style = style + " underline" if style else "underline"
+                    new_fragments.append((link_style, part, opener))
+                else:
+                    new_fragments.append((style, part))
+        return new_fragments
 
 
 def build_key_bindings() -> KeyBindings:
