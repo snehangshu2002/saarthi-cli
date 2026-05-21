@@ -130,6 +130,7 @@ Contents:
 - `mcp_config.json` — MCP server definitions
 - `data/checkpoints.db` — conversation checkpoint history (SQLite)
 - `data/memory.db` — long-term memory store (SQLite)
+- `skills/` — user-defined custom skills (Python & Markdown)
 - `images/` — clipboard-pasted images saved here
 - `saarthi.log` — error logs (never shown on screen)
 
@@ -162,6 +163,7 @@ Contents:
 | `Enter`         | Submit message                                      |
 | `Ctrl+V`        | Paste text — or paste an image from the clipboard   |
 | `Right-click`   | Paste text or clipboard image into the input field  |
+| `?`             | Show full shortcuts menu (when input is empty)      |
 | `Ctrl+O`        | Expand / collapse the last tool output block        |
 | `Ctrl+T`        | Toggle tool approval mode (Ask ↔ Auto)              |
 | `Shift+Tab`     | Toggle Plan Mode on / off                           |
@@ -232,7 +234,7 @@ The AI will spawn a `researcher` sub-agent to gather information, then a `writer
 
 ## Skill System
 
-Skills are custom Python scripts saved in the `skills/` directory at the project root. Once saved, they are automatically discovered and registered as callable tools (`skill_<name>`) in the very next turn — both for you and for the AI.
+Skills are custom Python scripts or Markdown files saved in the `skills/` directory (located in your local storage path). Once saved, they are automatically discovered and registered as callable tools (`skill_<name>`) in the very next turn — both for you and for the AI.
 
 ### How It Works
 
@@ -344,6 +346,8 @@ Default configuration:
 }
 ```
 
+> **Important:** Every MCP server block MUST include a valid `"transport"` key (e.g. `"stdio"`, `"sse"`, `"websocket"`), otherwise the connection will fail to parse and tools will not load.
+
 You can connect MCP servers for filesystem access, browser automation, databases, coding agents, external APIs, and custom tools.
 
 ---
@@ -364,7 +368,6 @@ The AI automatically extracts and updates long-term memories from your messages.
 ```text
 saarthi-cli/
 ├── main.py
-├── skills/                    ← user-defined skill scripts go here
 ├── pyproject.toml
 └── src/chatbot_cli/
     ├── app.py                 ← main entry point & chat loop
