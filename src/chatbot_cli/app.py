@@ -147,7 +147,7 @@ async def run():
             
             async def chat_loop():
                 nonlocal config, model, model_name, provider, api_key, embedding_model, dims
-                resume_options = None
+                active_selection_mode = None
 
                 while True:
                     try:
@@ -160,69 +160,108 @@ async def run():
                     if not user_input:
                         continue
 
-                    if resume_options is not None:
+                    if active_selection_mode is not None:
+                        mode = active_selection_mode
+                        active_selection_mode = None
+
                         if user_input == "__cancel_select__":
-                            ui.append_block("Resume cancelled.")
-                            resume_options = None
+                            ui.append_block("Selection cancelled.")
                             ui.cancel_selection()
                             continue
 
                         if user_input != "__select__":
-                            continue
-
-                        selected = ui.current_selection()
-                        if selected is None:
-                            resume_options = None
                             ui.cancel_selection()
                             continue
 
-                        resume_options = None
+                        selected = ui.current_selection()
                         ui.cancel_selection()
-                        config = {
-                            "configurable": {
-                                "user_id": user_id,
-                                "thread_id": selected["thread_id"],
-                            }
-                        }
 
-                        snapshot = await load_thread_snapshot(checkpointer, selected["thread_id"])
-                        ui.clear_transcript()
-                        if snapshot is not None:
-                            messages = snapshot.checkpoint.get("channel_values", {}).get("messages", [])
+                        if selected is None:
+                            continue
+
+                        if mode == "resume":
+                            config = {
+                                "configurable": {
+                                    "user_id": user_id,
+                                    "thread_id": selected["thread_id"],
+                                }
+                            }
+
+                            snapshot = await load_thread_snapshot(checkpointer, selected["thread_id"])
+                            ui.clear_transcript()
+                            if snapshot is not None:
+                                messages = snapshot.checkpoint.get("channel_values", {}).get("messages", [])
+                                
+                                # REBUILD HISTORY USING INTERACTIVE UI COMPONENTS
+                                tool_args_map = {}
+                                for msg in messages:
+                                    if isinstance(msg, HumanMessage):
+                                        ui.append_block(f"> {msg.content}")
+                                    elif isinstance(msg, AIMessage):
+                                        for tc in getattr(msg, "tool_calls", []):
+                                            tool_args_map[tc["id"]] = tc["args"]
+                                        if msg.content:
+                                            ui.start_bot_message()
+                                            ui.finish_bot_message(str(msg.content))
+                                    elif isinstance(msg, ToolMessage):
+                                        name = getattr(msg, "name", "tool")
+                                        tid = getattr(msg, "tool_call_id", "")
+                                        args = tool_args_map.get(tid, {})
+                                        
+                                        header = ""
+                                        if args:
+                                            try:
+                                                s = json.dumps(args, ensure_ascii=False)
+                                                header = f"({s if len(s)<=80 else s[:80]+'…'})"
+                                            except Exception:
+                                                pass
+                                                
+                                        full_output = f"{name}{header}\n{msg.content}"
+                                        ui.append_tool_block(name, full_output, in_flight=False)
+                                        
+                            ui.append_block(
+                                "Resumed session: "
+                                + format_checkpoint_time(selected["ts"])
+                                + f"  ({selected['thread_id'][:8]})"
+                            )
+                            continue
+
+                        elif mode == "model":
+                            new_model_name = selected["value"]
                             
-                            # REBUILD HISTORY USING INTERACTIVE UI COMPONENTS
-                            tool_args_map = {}
-                            for msg in messages:
-                                if isinstance(msg, HumanMessage):
-                                    ui.append_block(f"> {msg.content}")
-                                elif isinstance(msg, AIMessage):
-                                    for tc in getattr(msg, "tool_calls", []):
-                                        tool_args_map[tc["id"]] = tc["args"]
-                                    if msg.content:
-                                        ui.start_bot_message()
-                                        ui.finish_bot_message(str(msg.content))
-                                elif isinstance(msg, ToolMessage):
-                                    name = getattr(msg, "name", "tool")
-                                    tid = getattr(msg, "tool_call_id", "")
-                                    args = tool_args_map.get(tid, {})
-                                    
-                                    header = ""
-                                    if args:
-                                        try:
-                                            s = json.dumps(args, ensure_ascii=False)
-                                            header = f"({s if len(s)<=80 else s[:80]+'…'})"
-                                        except Exception:
-                                            pass
-                                            
-                                    full_output = f"{name}{header}\n{msg.content}"
-                                    ui.append_tool_block(name, full_output, in_flight=False)
-                                    
-                        ui.append_block(
-                            "Resumed session: "
-                            + format_checkpoint_time(selected["ts"])
-                            + f"  ({selected['thread_id'][:8]})"
-                        )
-                        continue
+                            if new_model_name == "custom":
+                                ui.append_block("To use a custom model, type: /model <name>")
+                                continue
+
+                            try:
+                                new_model, new_embed, new_dims = get_models(
+                                    provider,
+                                    api_key,
+                                    model_name=new_model_name,
+                                    embedding_provider=embedding_provider,
+                                    embedding_model=embedding_model_name,
+                                    api_keys=api_keys,
+                                )
+                                model = new_model
+                                model_name = new_model_name
+                                import chatbot_cli.providers as _prov
+                                _prov.ACTIVE_CHAT_MODEL = model
+                                graph_ref[0] = build_graph(
+                                    model=model,
+                                    checkpointer=checkpointer,
+                                    store=store,
+                                    tools=tools,
+                                )
+                                saved = load_settings()
+                                saved["model"] = new_model_name
+                                from chatbot_cli.settings import save_settings
+                                save_settings(saved)
+
+                                ui.set_model_name(model.provider if hasattr(model, "provider") else provider)
+                                ui.append_block(f"Model switched to: {new_model_name}")
+                            except Exception as err:
+                                ui.append_block(f"Failed to switch model: {err}")
+                            continue
 
                     ui.append_block(f"> {user_input}")
 
@@ -230,6 +269,22 @@ async def run():
                         ui.append_block("Bye!")
                         ui.app.exit()
                         break
+
+                    if user_input == "?":
+                        lines = [
+                            "Keyboard Shortcuts:",
+                            "  Ctrl+C      : Exit application (or cancel current action/selection)",
+                            "  Ctrl+O      : Expand or collapse tool output blocks",
+                            "  Ctrl+G      : Open external editor for long multi-line prompts",
+                            "  Ctrl+Space  : Start text highlighting (use arrow keys to expand, Ctrl+C to copy)",
+                            "  Ctrl+V      : Paste text (use /image for pasting images)",
+                            "  Up/Down     : Browse message history (when input is empty)",
+                            "  Tab         : Autocomplete commands",
+                            "",
+                            "Type /help to see all slash commands."
+                        ]
+                        ui.append_block("\n".join(lines))
+                        continue
 
                     if user_input == "/help":
                         lines = ["Available commands:"]
@@ -324,15 +379,14 @@ async def run():
                     if user_input == "/resume":
                         sessions = await list_user_sessions(checkpointer, user_id)
                         if not sessions:
-                            ui.append_block("No saved conversations found.")
-                            continue
-
-                        resume_options = sessions
-                        ui.start_selection(
-                            "Saved conversations:",
-                            sessions,
-                            "Use Up/Down and Enter to resume. Esc or Ctrl+C cancels.",
-                        )
+                            ui.append_block("No previous conversations found.")
+                        else:
+                            active_selection_mode = "resume"
+                            ui.start_selection(
+                                "Saved conversations:",
+                                sessions,
+                                "Use Up/Down and Enter to resume. Esc or Ctrl+C cancels.",
+                            )
                         continue
 
                     if user_input == "/export" or user_input.startswith("/export "):
@@ -389,81 +443,54 @@ async def run():
 
                     if user_input == "/model" or user_input.startswith("/model "):
                         from chatbot_cli.providers import PROVIDER_MODELS, DEFAULT_MODELS, SUPPORTED_PROVIDERS
-                        from prompt_toolkit.shortcuts import radiolist_dialog, input_dialog
 
                         parts = user_input.split(maxsplit=1)
-                        # If the user typed /model <name> directly, use that name
                         inline_model = parts[1].strip() if len(parts) > 1 else None
 
                         if inline_model:
                             new_model_name = inline_model
+                            # Hot-reload directly
+                            try:
+                                new_model, new_embed, new_dims = get_models(
+                                    provider,
+                                    api_key,
+                                    model_name=new_model_name,
+                                    embedding_provider=embedding_provider,
+                                    embedding_model=embedding_model_name,
+                                    api_keys=api_keys,
+                                )
+                                model = new_model
+                                model_name = new_model_name
+                                import chatbot_cli.providers as _prov
+                                _prov.ACTIVE_CHAT_MODEL = model
+                                graph_ref[0] = build_graph(
+                                    model=model,
+                                    checkpointer=checkpointer,
+                                    store=store,
+                                    tools=tools,
+                                )
+                                saved = load_settings()
+                                saved["model"] = new_model_name
+                                from chatbot_cli.settings import save_settings
+                                save_settings(saved)
+
+                                ui.set_model_name(model.provider if hasattr(model, "provider") else provider)
+                                ui.append_block(f"Model switched to: {new_model_name}")
+                            except Exception as err:
+                                ui.append_block(f"Failed to switch model: {err}")
+                            continue
                         else:
-                            # Show interactive picker
+                            # Show inline UI picker instead of full-screen dialog
                             models_list = PROVIDER_MODELS.get(provider, [])
-                            dialog_values = [(m, m) for m in models_list]
-                            dialog_values.append(("custom", "Custom model name..."))
-
-                            chosen = await radiolist_dialog(
-                                title=f"Switch Model — {SUPPORTED_PROVIDERS.get(provider, provider)}",
-                                text=(
-                                    f"Current model: {model_name or DEFAULT_MODELS.get(provider, '?')}\n\n"
-                                    "Use Up/Down to move, Space to select, Enter to confirm."
-                                ),
-                                values=dialog_values,
-                                default=model_name or DEFAULT_MODELS.get(provider, ""),
-                                ok_text="Switch",
-                                cancel_text="Cancel",
-                            ).run_async()
-
-                            if chosen is None:
-                                ui.append_block("Model switch cancelled.")
-                                continue
-
-                            if chosen == "custom":
-                                chosen = await input_dialog(
-                                    title="Custom Model Name",
-                                    text="Enter the exact model identifier (e.g. gpt-4o-mini, llama3.2:latest):",
-                                    default=model_name or "",
-                                    ok_text="Switch",
-                                    cancel_text="Cancel",
-                                ).run_async()
-                                if not chosen or not chosen.strip():
-                                    ui.append_block("Model switch cancelled.")
-                                    continue
-                                chosen = chosen.strip()
-
-                            new_model_name = chosen
-
-                        # Hot-reload the model and recompile the graph
-                        try:
-                            new_model, new_embed, new_dims = get_models(
-                                provider,
-                                api_key,
-                                model_name=new_model_name,
-                                embedding_provider=embedding_provider,
-                                embedding_model=embedding_model_name,
-                                api_keys=api_keys,
+                            dialog_values = [{"label": m, "value": m} for m in models_list]
+                            dialog_values.append({"label": "Custom model name...", "value": "custom"})
+                            
+                            active_selection_mode = "model"
+                            ui.start_selection(
+                                f"Switch Model — {SUPPORTED_PROVIDERS.get(provider, provider)}",
+                                dialog_values,
+                                "Use Up/Down to move, Enter to select. Esc cancels."
                             )
-                            model = new_model
-                            model_name = new_model_name
-                            import chatbot_cli.providers as _prov
-                            _prov.ACTIVE_CHAT_MODEL = model
-                            graph_ref[0] = build_graph(
-                                model=model,
-                                checkpointer=checkpointer,
-                                store=store,
-                                tools=tools,
-                            )
-                            # Persist to settings.json
-                            saved = load_settings()
-                            saved["model"] = new_model_name
-                            from chatbot_cli.settings import save_settings
-                            save_settings(saved)
-
-                            ui.set_model_name(model.provider if hasattr(model, "provider") else provider)
-                            ui.append_block(f"Model switched to: {new_model_name}")
-                        except Exception as err:
-                            ui.append_block(f"Failed to switch model: {err}")
                         continue
 
                     if user_input == "/skills":
@@ -574,6 +601,18 @@ async def run():
                                 "  /skill delete <name>       — Delete a skill"
                             )
                             continue
+
+                    if user_input == "/image":
+                        from chatbot_cli.ui import _grab_clipboard_image
+                        filepath, filename = _grab_clipboard_image()
+                        if filepath:
+                            ui.pasted_images.append(filepath)
+                            ui.append_block(f"✅ Image attached: {filename}. It will be sent with your next prompt.")
+                        elif filename:
+                            ui.append_block(f"❌ Could not attach image: {filename}")
+                        else:
+                            ui.append_block("❌ No image found in the clipboard.")
+                        continue
 
                     if user_input.startswith("/"):
                         ui.append_block(f"Unknown command: {user_input}. Type /help.")
