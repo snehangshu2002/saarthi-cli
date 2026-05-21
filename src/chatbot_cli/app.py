@@ -579,7 +579,7 @@ async def run():
                             )
                         continue
 
-                    if user_input.startswith("/skill "):
+                    if user_input.startswith("/skill ") or user_input.startswith("/skills "):
                         parts = user_input.split(maxsplit=2)
                         subcommand = parts[1] if len(parts) > 1 else ""
 
@@ -590,6 +590,8 @@ async def run():
                             rest = parts[2]
                             run_parts = rest.split(maxsplit=1)
                             skill_name = run_parts[0]
+                            if skill_name.endswith(".py") or skill_name.endswith(".md"):
+                                skill_name = skill_name[:-3]
                             skill_args = run_parts[1] if len(run_parts) > 1 else ""
 
                             from chatbot_cli.app_config import SKILLS_DIR
@@ -629,6 +631,8 @@ async def run():
                                 ui.append_block("Usage: /skill show <name>")
                                 continue
                             skill_name = parts[2].strip()
+                            if skill_name.endswith(".py") or skill_name.endswith(".md"):
+                                skill_name = skill_name[:-3]
                             from chatbot_cli.app_config import SKILLS_DIR
                             skill_py = SKILLS_DIR / f"{skill_name}.py"
                             skill_md = SKILLS_DIR / f"{skill_name}.md"
@@ -654,6 +658,8 @@ async def run():
                                 ui.append_block("Usage: /skill delete <name>")
                                 continue
                             skill_name = parts[2].strip()
+                            if skill_name.endswith(".py") or skill_name.endswith(".md"):
+                                skill_name = skill_name[:-3]
                             from chatbot_cli.app_config import SKILLS_DIR
                             skill_py = SKILLS_DIR / f"{skill_name}.py"
                             skill_md = SKILLS_DIR / f"{skill_name}.md"
