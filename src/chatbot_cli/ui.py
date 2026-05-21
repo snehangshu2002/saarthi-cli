@@ -497,6 +497,18 @@ class ChatUI:
                 self.app.layout.focus(self.input)
                 self.set_status("")
 
+        @bindings.add("tab")
+        def _(event):
+            buffer = self.input.buffer
+            if buffer.complete_state:
+                if buffer.complete_state.current_completion:
+                    buffer.apply_completion(buffer.complete_state.current_completion)
+                else:
+                    buffer.complete_next()
+            else:
+                # Try to start completion. If it yields something, we select first.
+                buffer.start_completion(select_first=True)
+
         @bindings.add("s-tab")
         def _(event):
             self.plan_mode = not self.plan_mode
