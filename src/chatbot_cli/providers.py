@@ -17,7 +17,7 @@ _PROVIDER_PACKAGES = {
     "openai":  "langchain-openai",
     "google":  "langchain-google-genai",
     "anthropic": "langchain-anthropic",
-    "ollama": "langchain-community",
+    "ollama": "langchain-ollama",
 }
 
 DEFAULT_MODELS = {
@@ -192,11 +192,11 @@ def get_models(
 
     elif provider == "ollama":
         try:
-            from langchain_community.chat_models import ChatOllama
+            from langchain_ollama import ChatOllama
         except ImportError:
             raise ImportError(
-                "The 'langchain-community' package is required for Ollama. "
-                "Run: pip install langchain-community"
+                "The 'langchain-ollama' package is required for Ollama. "
+                "Run: pip install langchain-ollama"
             )
         chat = ChatOllama(model=active_model)
 
@@ -260,11 +260,11 @@ def get_models(
 
     elif active_embed_provider == "ollama":
         try:
-            from langchain_community.embeddings import OllamaEmbeddings
+            from langchain_ollama import OllamaEmbeddings
         except ImportError:
             raise ImportError(
-                "The 'langchain-community' package is not installed for Ollama embeddings. "
-                "Run: pip install langchain-community"
+                "The 'langchain-ollama' package is not installed for Ollama embeddings. "
+                "Run: pip install langchain-ollama"
             )
         embed = OllamaEmbeddings(model=embedding_model or "nomic-embed-text")
         dims = 768
