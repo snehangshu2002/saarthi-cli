@@ -287,7 +287,9 @@ async def delegate_task(agent_role: str, instruction: str, context: str = "") ->
                         tool_output = f"ERROR: {e}"
                         
                 if ACTIVE_CHAT_UI:
+                    # Clean up whitespace and newlines for a compact UI display
                     snippet = str(tool_output).strip()
+                    snippet = " ".join(snippet.split())
                     if len(snippet) > 200:
                         snippet = snippet[:200] + "..."
                     ACTIVE_CHAT_UI.append_block(f"📥 [{agent_role.upper()}] Tool output: {snippet}")
