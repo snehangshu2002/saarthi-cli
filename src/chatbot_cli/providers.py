@@ -5,27 +5,83 @@ main.py never imports any provider directly.
 """
 
 SUPPORTED_PROVIDERS = {
-    "mistral": "Mistral AI  (mistral-large-latest)",
-    "openai":  "OpenAI      (gpt-4o)",
-    "google":  "Google      (gemini-1.5-flash)",
+    "mistral": "Mistral AI",
+    "openai":  "OpenAI",
+    "google":  "Google Gemini",
+    "anthropic": "Anthropic Claude",
+    "ollama": "Ollama (Local)",
 }
 
 _PROVIDER_PACKAGES = {
     "mistral": "langchain-mistralai",
     "openai":  "langchain-openai",
     "google":  "langchain-google-genai",
+    "anthropic": "langchain-anthropic",
+    "ollama": "langchain-community",
+}
+
+DEFAULT_MODELS = {
+    "mistral": "mistral-large-latest",
+    "openai": "gpt-4o",
+    "google": "gemini-1.5-flash",
+    "anthropic": "claude-3-5-sonnet-latest",
+    "ollama": "llama3",
+}
+
+PROVIDER_MODELS = {
+    "mistral": ["mistral-large-latest", "mistral-small-latest", "codestral-latest", "open-mixtral-8x22b"],
+    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4", "o1-mini", "o1-preview"],
+    "google": ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.0-pro-exp"],
+    "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"],
+    "ollama": ["llama3", "mistral", "phi3", "gemma2", "codegemma"],
 }
 
 
-def get_models(provider: str, api_key: str):
-    """
-    Returns (chat_model, embedding_model, embedding_dims) for the given provider.
-    Imports are lazy — only the chosen provider's package is imported.
+from langchain_core.embeddings import Embeddings
+import hashlib
+import math
 
-    Raises:
-        ValueError: If the provider is not supported or api_key is empty.
-        ImportError: If the required provider package is not installed.
-        Exception: Propagated from the provider SDK on auth/init failure.
+ACTIVE_CHAT_MODEL = None
+
+class DeterministicFakeEmbeddings(Embeddings):
+    """
+    A pure-python deterministic fake embedding model.
+    Generates consistent vectors based on string content hashing.
+    """
+    def __init__(self, dimensionality: int = 768):
+        self.dimensionality = dimensionality
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed(t) for t in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed(text)
+
+    def _embed(self, text: str) -> list[float]:
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        vec = []
+        for i in range(self.dimensionality):
+            val = hashlib.sha256(h + i.to_bytes(4, "big")).digest()
+            vec.append(float(val[0]) / 255.0 - 0.5)
+        # Normalize vector to unit length
+        sq_sum = sum(x * x for x in vec)
+        norm = math.sqrt(sq_sum)
+        if norm > 0:
+            vec = [x / norm for x in vec]
+        return vec
+
+
+def get_models(
+    provider: str,
+    api_key: str,
+    model_name: str = None,
+    embedding_provider: str = None,
+    embedding_model: str = None,
+    api_keys: dict = None,
+):
+    """
+    Returns (chat_model, embedding_model, embedding_dims) for the given provider and configuration.
+    Imports are lazy — only required provider packages are imported.
     """
     if not provider or provider not in SUPPORTED_PROVIDERS:
         raise ValueError(
@@ -33,47 +89,143 @@ def get_models(provider: str, api_key: str):
             f"Choose from: {list(SUPPORTED_PROVIDERS.keys())}"
         )
 
-    if not api_key or not api_key.strip():
+    # For Ollama, api key is not required. For others, it's checked either from api_key or api_keys dict.
+    active_key = api_key
+    if api_keys and provider in api_keys and api_keys[provider]:
+        active_key = api_keys[provider]
+
+    if provider != "ollama" and (not active_key or not active_key.strip()):
         raise ValueError(
             f"API key for '{provider}' is empty. "
-            f"Run /settings or edit settings.json to add your key."
+            f"Run /settings edit or edit settings.json to add your key."
         )
 
+    # Resolve model name
+    active_model = model_name or DEFAULT_MODELS.get(provider)
+
+    # 1. Instantiate Chat Model
     if provider == "mistral":
         try:
-            from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
+            from langchain_mistralai import ChatMistralAI
         except ImportError:
             raise ImportError(
                 "The 'langchain-mistralai' package is not installed. "
                 "Run: pip install langchain-mistralai"
             )
-        chat  = ChatMistralAI(api_key=api_key)
-        embed = MistralAIEmbeddings(api_key=api_key)
-        dims  = 1024
-        return chat, embed, dims
+        chat = ChatMistralAI(api_key=active_key, model=active_model)
 
     elif provider == "openai":
         try:
-            from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+            from langchain_openai import ChatOpenAI
         except ImportError:
             raise ImportError(
                 "The 'langchain-openai' package is not installed. "
                 "Run: pip install langchain-openai"
             )
-        chat  = ChatOpenAI(api_key=api_key, model="gpt-4o")
-        embed = OpenAIEmbeddings(api_key=api_key, model="text-embedding-3-small")
-        dims  = 1536
-        return chat, embed, dims
+        chat = ChatOpenAI(api_key=active_key, model=active_model)
 
     elif provider == "google":
         try:
-            from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+            from langchain_google_genai import ChatGoogleGenerativeAI
         except ImportError:
             raise ImportError(
                 "The 'langchain-google-genai' package is not installed. "
                 "Run: pip install langchain-google-genai"
             )
-        chat  = ChatGoogleGenerativeAI(google_api_key=api_key, model="gemini-1.5-flash")
-        embed = GoogleGenerativeAIEmbeddings(google_api_key=api_key, model="models/embedding-001")
-        dims  = 768
-        return chat, embed, dims
+        chat = ChatGoogleGenerativeAI(google_api_key=active_key, model=active_model)
+
+    elif provider == "anthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+        except ImportError:
+            raise ImportError(
+                "The 'langchain-anthropic' package is not installed. "
+                "Run: pip install langchain-anthropic"
+            )
+        chat = ChatAnthropic(api_key=active_key, model=active_model)
+
+    elif provider == "ollama":
+        try:
+            from langchain_community.chat_models import ChatOllama
+        except ImportError:
+            raise ImportError(
+                "The 'langchain-community' package is required for Ollama. "
+                "Run: pip install langchain-community"
+            )
+        chat = ChatOllama(model=active_model)
+
+    # 2. Instantiate Embedding Model
+    # Default embedding provider to chat provider if not specified, except anthropic which defaults to local
+    active_embed_provider = embedding_provider
+    if not active_embed_provider or active_embed_provider == "anthropic":
+        if provider == "anthropic":
+            active_embed_provider = "local"
+        else:
+            active_embed_provider = provider
+
+    # Helper to get the correct API key for embedding provider
+    def get_embed_key(p):
+        if api_keys and p in api_keys and api_keys[p]:
+            return api_keys[p]
+        return active_key if p == provider else ""
+
+    if active_embed_provider == "mistral":
+        try:
+            from langchain_mistralai import MistralAIEmbeddings
+        except ImportError:
+            raise ImportError(
+                "The 'langchain-mistralai' package is not installed for embeddings. "
+                "Run: pip install langchain-mistralai"
+            )
+        embed_key = get_embed_key("mistral")
+        if not embed_key:
+            raise ValueError("API key for Mistral embeddings is missing.")
+        embed = MistralAIEmbeddings(api_key=embed_key)
+        dims = 1024
+
+    elif active_embed_provider == "openai":
+        try:
+            from langchain_openai import OpenAIEmbeddings
+        except ImportError:
+            raise ImportError(
+                "The 'langchain-openai' package is not installed for embeddings. "
+                "Run: pip install langchain-openai"
+            )
+        embed_key = get_embed_key("openai")
+        if not embed_key:
+            raise ValueError("API key for OpenAI embeddings is missing.")
+        active_embed_model = embedding_model or "text-embedding-3-small"
+        embed = OpenAIEmbeddings(api_key=embed_key, model=active_embed_model)
+        dims = 3072 if active_embed_model == "text-embedding-3-large" else 1536
+
+    elif active_embed_provider == "google":
+        try:
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+        except ImportError:
+            raise ImportError(
+                "The 'langchain-google-genai' package is not installed for embeddings. "
+                "Run: pip install langchain-google-genai"
+            )
+        embed_key = get_embed_key("google")
+        if not embed_key:
+            raise ValueError("API key for Google embeddings is missing.")
+        embed = GoogleGenerativeAIEmbeddings(google_api_key=embed_key, model=embedding_model or "models/embedding-001")
+        dims = 768
+
+    elif active_embed_provider == "ollama":
+        try:
+            from langchain_community.embeddings import OllamaEmbeddings
+        except ImportError:
+            raise ImportError(
+                "The 'langchain-community' package is not installed for Ollama embeddings. "
+                "Run: pip install langchain-community"
+            )
+        embed = OllamaEmbeddings(model=embedding_model or "nomic-embed-text")
+        dims = 768
+
+    else:
+        # local / fallback
+        embed = DeterministicFakeEmbeddings()
+        dims = 768
+
+    return chat, embed, dims
