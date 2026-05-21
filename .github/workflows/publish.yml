@@ -2,6 +2,8 @@ name: Build and Publish to PyPI
 
 on:
   push:
+    tags:
+      - "v*"  # triggers only on version tags like v1.0.0
 
 jobs:
   build:
@@ -21,7 +23,7 @@ jobs:
         run: uv build
 
       - name: Check package
-        run: uvx twine check dist/*
+        run: uvx twine check dist/*  # use uvx instead of pip install
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
@@ -32,7 +34,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: pypi  # required for OIDC trusted publishing
     permissions:
       id-token: write
       contents: read
