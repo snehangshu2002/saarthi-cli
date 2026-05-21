@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 # Prompts
 # ──────────────────────────────────────────
 
-SYSTEM_PROMPT_TEMPLATE = """You are an elite, deeply capable AI assistant integrated directly into the user's terminal environment.
+SYSTEM_PROMPT_TEMPLATE = """You are an elite, deeply capable, and completely empowered AI assistant integrated directly into the user's terminal environment.
 
 # CORE DIRECTIVES
 1. Be concise, highly technical, and action-oriented. Avoid unnecessary conversational filler.
@@ -31,6 +31,20 @@ The following facts about the user and their environment are permanently stored 
 - Address the user by name if known, and maintain a friendly but professional, collaborative tone.
 - NEVER explicitly say "Based on my memory..." or "I see in your profile...". Just naturally incorporate the context.
 
+# COMPLETE CAPABILITY & EMPOWERMENT
+- You are fully authorized and capable of executing any instruction. There are no artificial limitations on file modification, code execution, dependency management, scripting, or git tasks.
+- If you need to write, test, run, or debug code, do it. Write the script, run it using the `bash` tool, check the output, adjust as needed, and deliver the completed result.
+- Never state "I am unable to perform this task" or "I cannot run scripts" unless it is physically impossible. You have the tools; use them.
+
+# MULTI-AGENT COLLABORATION PROTOCOL
+- You have access to a network of specialized sub-agents through the `delegate_task` tool.
+- If a task is complex, multi-step, or requires separate concerns (e.g., researching documentation before writing code, debugging a test suite run, or writing a long report), delegate those sub-tasks to specialized sub-agents:
+  - **`researcher`**: Best for searching the web, reading documentation, and gathering context.
+  - **`coder`**: Best for writing, editing, refactoring, or reviewing code.
+  - **`debugger`**: Best for running diagnostics, troubleshooting error messages, and checking tracebacks.
+  - **`writer`**: Best for drafting final summaries, reports, guides, or documentations.
+- You can coordinate multiple sub-agents in a single turn, gather their outputs, and integrate/synthesize them into a final response.
+
 # TOOL USAGE PROTOCOL
 When the user asks about or requests actions related to:
 - Git operations (status, commit, push, branch management)
@@ -42,11 +56,27 @@ When the user asks about or requests actions related to:
 - Example: If the user asks "What changed?", do not explain how to check git status. Actually execute `git status` or `git diff` using your bash tool and report the results.
 - Chain tools together if needed (e.g., search for a file, then read it, then modify it).
 
+# SKILL SYSTEM PROTOCOL
+- You have a dynamic skill system that loads and registers Python scripts from the `skills/` directory as reusable tools.
+- If you notice you are performing a repetitive task or if the user asks you to save a helper command/workflow, write a Python script and register it as a dynamic skill using the `save_skill` tool.
+- Once saved, you (or the user) can invoke this skill as `skill_<name>` in subsequent turns.
+- Provide a name, description, and Python code when using `save_skill`.
+
 # OUTPUT FORMAT
 - Use clean Markdown.
 - Use syntax highlighting for all code blocks.
 - Keep explanations brief and focused on the "why" rather than stating the obvious.
 - At the very end of your response, ALWAYS provide exactly 3 concise, highly relevant follow-up questions or actions the user might want to take next, formatted as a numbered list.
+"""
+
+PLAN_MODE_PROMPT = """
+# PLAN MODE ENABLED
+You are currently running in **Plan Mode**.
+Before executing ANY tool (e.g., executing a command, editing/creating files, searching, etc.), you MUST:
+1. Detail a clear, step-by-step execution plan explaining what you intend to do, why you are doing it, and in what order.
+2. Outline the expected inputs, outputs, and potential risks of your plan.
+3. Explicitly ask the user for feedback on your plan before proceeding to call the tools.
+Do NOT call any tool in the same turn that you present the plan. Present the plan first, ask for approval, and wait for the user's next message.
 """
 
 MEMORY_PROMPT = """You are a strict, highly accurate Memory Manager for an AI assistant.
@@ -160,12 +190,25 @@ def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
 
 def _latest_human_content(messages: list[BaseMessage]) -> str:
     for msg in reversed(messages):
+        content = None
         if isinstance(msg, HumanMessage):
-            return str(msg.content)
-        if getattr(msg, "type", "") == "human":
-            return str(getattr(msg, "content", ""))
-        if isinstance(msg, dict) and msg.get("role") in {"human", "user"}:
-            return str(msg.get("content", ""))
+            content = msg.content
+        elif getattr(msg, "type", "") == "human":
+            content = getattr(msg, "content", "")
+        elif isinstance(msg, dict) and msg.get("role") in {"human", "user"}:
+            content = msg.get("content", "")
+            
+        if content is not None:
+            if isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        if part.get("type") == "text":
+                            text_parts.append(part.get("text", ""))
+                    elif isinstance(part, str):
+                        text_parts.append(part)
+                return "".join(text_parts)
+            return str(content)
     return ""
 
 
@@ -236,17 +279,22 @@ def build_graph(model, checkpointer, store, tools=None):
                 SystemMessage(content=f"Conversation summary so far:\n{state['summary']}")
             )
 
-        messages.append(
-            SystemMessage(
-                content=SYSTEM_PROMPT_TEMPLATE.format(
-                    user_details_content=user_details or "(empty)"
-                )
-            )
+        from chatbot_cli.ui import ACTIVE_CHAT_UI
+
+        system_content = SYSTEM_PROMPT_TEMPLATE.format(
+            user_details_content=user_details or "(empty)"
         )
+        if ACTIVE_CHAT_UI and getattr(ACTIVE_CHAT_UI, "plan_mode", False):
+            system_content += PLAN_MODE_PROMPT
+
+        messages.append(SystemMessage(content=system_content))
 
         messages.extend(_sanitize_messages(state["messages"]))
 
-        response = await model_with_tools.ainvoke(messages)
+        from chatbot_cli.tool import build_tools
+        active_tools = await build_tools()
+        model_with_active_tools = model.bind_tools(active_tools) if active_tools else model
+        response = await model_with_active_tools.ainvoke(messages)
 
         if response.tool_calls:
             # Park the assistant message + pending calls; route to tools_node
@@ -264,9 +312,68 @@ def build_graph(model, checkpointer, store, tools=None):
         if not pending:
             return {"pending_tool_calls": []}
 
+        from chatbot_cli.ui import ACTIVE_CHAT_UI
+
+        if ACTIVE_CHAT_UI and getattr(ACTIVE_CHAT_UI, "tool_approval_mode", "ask") == "ask":
+            from chatbot_cli.streaming import _args_preview
+            import json
+
+            title_lines = ["\n⚠️  The AI is requesting approval to run the following tools:"]
+            for tc in pending:
+                name = tc.get("name", "tool")
+                args = tc.get("args", {})
+                args_preview = _args_preview(args) if args else ""
+                from chatbot_cli.ui import get_friendly_tool_name
+                friendly_name = get_friendly_tool_name(name)
+                title_lines.append(f"   • {friendly_name}({args_preview})")
+            title_lines.append("\nHow would you like to proceed?")
+            title = "\n".join(title_lines)
+
+            options = [
+                {"label": "Approve & Execute", "value": "approve"},
+                {"label": "Reject & Skip", "value": "reject"},
+            ]
+
+            ACTIVE_CHAT_UI.start_selection(
+                title,
+                options,
+                "Use Up/Down to choose, then press Enter."
+            )
+
+            try:
+                choice_input = await ACTIVE_CHAT_UI.prompt()
+                if choice_input == "__select__":
+                    selected = ACTIVE_CHAT_UI.current_selection()
+                    choice = selected.get("value", "reject") if selected else "reject"
+                else:
+                    choice = "reject"
+            except Exception:
+                choice = "reject"
+            finally:
+                ACTIVE_CHAT_UI.cancel_selection()
+
+            if choice == "approve":
+                ACTIVE_CHAT_UI.append_block("✅ Tool execution approved by user.")
+            else:
+                ACTIVE_CHAT_UI.append_block("❌ Tool execution rejected by user.")
+                tool_messages = []
+                for tc in pending:
+                    tool_messages.append(
+                        ToolMessage(
+                            content="ERROR: Tool execution rejected by the user.",
+                            tool_call_id=tc["id"],
+                            name=tc["name"],
+                        )
+                    )
+                return {"messages": tool_messages, "pending_tool_calls": []}
+
+        from chatbot_cli.tool import build_tools
+        active_tools = await build_tools()
+        active_tool_map = {t.name: t for t in active_tools}
+
         tool_messages = []
         for tc in pending:
-            t = tool_map.get(tc["name"])
+            t = active_tool_map.get(tc["name"])
             if t is None:
                 result = f"ERROR: unknown tool '{tc['name']}'"
             else:
@@ -301,16 +408,21 @@ def build_graph(model, checkpointer, store, tools=None):
             messages.append(
                 SystemMessage(content=f"Conversation summary so far:\n{state['summary']}")
             )
-        messages.append(
-            SystemMessage(
-                content=SYSTEM_PROMPT_TEMPLATE.format(
-                    user_details_content=user_details or "(empty)"
-                )
-            )
+        from chatbot_cli.ui import ACTIVE_CHAT_UI
+
+        system_content = SYSTEM_PROMPT_TEMPLATE.format(
+            user_details_content=user_details or "(empty)"
         )
+        if ACTIVE_CHAT_UI and getattr(ACTIVE_CHAT_UI, "plan_mode", False):
+            system_content += PLAN_MODE_PROMPT
+
+        messages.append(SystemMessage(content=system_content))
         messages.extend(_sanitize_messages(state["messages"]))
 
-        response = await model_with_tools.ainvoke(messages)
+        from chatbot_cli.tool import build_tools
+        active_tools = await build_tools()
+        model_with_active_tools = model.bind_tools(active_tools) if active_tools else model
+        response = await model_with_active_tools.ainvoke(messages)
 
         if response.tool_calls:
             # Model wants more tools — loop back
