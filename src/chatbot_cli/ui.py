@@ -803,30 +803,37 @@ class ChatUI:
     # CHUNKED TRANSCRIPT LOGIC
     # ─────────────────────────────────────────────────────────────────
 
-    def _rebuild_transcript(self):
-        text = ""
+    def _rebuild_transcript(self, force: bool = False):
+        import time
+        now = time.monotonic()
+        if not force:
+            if hasattr(self, "_last_rebuild_time") and (now - self._last_rebuild_time) < 0.05:
+                return
+        self._last_rebuild_time = now
+
+        parts = []
         for chunk in self._chunks:
             if chunk['type'] == 'text':
-                text += chunk['text'] + "\n"
+                parts.append(chunk['text'] + "\n")
             elif chunk['type'] == 'tool':
                 idx = chunk['idx']
                 tb = self._tool_blocks[idx]
-                text += self._tool_block_text(idx, tb['name'], tb['output'], tb['in_flight'])
+                parts.append(self._tool_block_text(idx, tb['name'], tb['output'], tb['in_flight']))
             elif chunk['type'] == 'thought':
                 idx = chunk['idx']
                 tb = self._thought_blocks[idx]
-                text += self._thought_block_text(idx, tb['elapsed'], tb['tokens'], tb['content'], tb['in_flight'])
+                parts.append(self._thought_block_text(idx, tb['elapsed'], tb['tokens'], tb['content'], tb['in_flight']))
             elif chunk['type'] == 'bot':
-                text += chunk['text'] + "\n"
+                parts.append(chunk['text'] + "\n")
             elif chunk['type'] == 'time':
-                text += chunk['text'] + "\n\n"
+                parts.append(chunk['text'] + "\n\n")
 
-        self._transcript_text = text
+        self._transcript_text = "".join(parts)
         self._render_transcript()
 
     def append_block(self, text: str):
         self._chunks.append({'type': 'text', 'text': text.strip('\n')})
-        self._rebuild_transcript()
+        self._rebuild_transcript(force=True)
 
     def clear_transcript(self):
         self._chunks.clear()
@@ -834,7 +841,7 @@ class ChatUI:
         self._tool_expanded.clear()
         self._thought_blocks.clear()
         self._auto_scroll = True
-        self._rebuild_transcript()
+        self._rebuild_transcript(force=True)
 
     def start_bot_message(self):
         self._spinner_active = True
@@ -842,13 +849,13 @@ class ChatUI:
             self._spinner_task = asyncio.create_task(self._run_spinner())
             
         self._chunks.append({'type': 'bot', 'text': '❯ '})
-        self._rebuild_transcript()
+        self._rebuild_transcript(force=True)
 
     def update_bot_message(self, text: str):
         if not self._chunks or self._chunks[-1]['type'] != 'bot':
             self.start_bot_message()
         self._chunks[-1]['text'] = '❯ ' + format_ai_output(text)
-        self._rebuild_transcript()
+        self._rebuild_transcript(force=False)
 
     def finish_bot_message(self, text: str):
         self.update_bot_message(text)
@@ -857,7 +864,8 @@ class ChatUI:
             elapsed = time.time() - self._turn_start_time
             self._turn_start_time = None
             self._chunks.append({'type': 'time', 'text': f"⏱  Total time: ({elapsed:.1f}s)"})
-            self._rebuild_transcript()
+            
+        self._rebuild_transcript(force=True)
             
         self.set_status("") 
 
@@ -865,14 +873,14 @@ class ChatUI:
         idx = len(self._tool_blocks)
         self._tool_blocks.append({'name': tool_name, 'output': full_output, 'in_flight': in_flight})
         self._chunks.append({'type': 'tool', 'idx': idx})
-        self._rebuild_transcript()
+        self._rebuild_transcript(force=True)
         return idx
 
     def update_tool_block(self, idx: int, full_output: str, in_flight: bool = True):
         if 0 <= idx < len(self._tool_blocks):
             self._tool_blocks[idx]['output'] = full_output
             self._tool_blocks[idx]['in_flight'] = in_flight
-            self._rebuild_transcript()
+            self._rebuild_transcript(force=True)
 
     def _tool_block_text(self, idx: int, tool_name: str, full_output: str, in_flight: bool) -> str:
         lines = full_output.rstrip().splitlines()
@@ -929,7 +937,7 @@ class ChatUI:
             'start_time': time.time()
         })
         self._chunks.append({'type': 'thought', 'idx': idx})
-        self._rebuild_transcript()
+        self._rebuild_transcript(force=True)
         return idx
 
     def update_thought(self, idx: int, content: str, tokens: int = None, in_flight: bool = True):
@@ -942,7 +950,7 @@ class ChatUI:
                 tb['tokens'] = tokens
             else:
                 tb['tokens'] = len(content.split())
-            self._rebuild_transcript()
+            self._rebuild_transcript(force=not in_flight)
 
     def _thought_block_text(self, idx: int, elapsed: float, tokens: int, content: str, in_flight: bool) -> str:
         header = f"{THOUGHT_HEADER_MARKER}▸ Thought for {elapsed:.1f}s, {tokens} tokens"
