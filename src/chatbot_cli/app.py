@@ -126,12 +126,12 @@ async def run():
         ) as store:
             await store.setup()
 
-            graph = build_graph(
+            graph_ref = [build_graph(
                 model=model,
                 checkpointer=checkpointer,
                 store=store,
                 tools=tools,
-            )
+            )]
             await seed_username(store, user_id)
 
             ui = ChatUI()
@@ -146,7 +146,7 @@ async def run():
                 ui.append_block("mcp_config.json created at your data directory. Edit it to add MCP servers.")
             
             async def chat_loop():
-                nonlocal config
+                nonlocal config, model, model_name, provider, api_key, embedding_model, dims
                 resume_options = None
 
                 while True:
@@ -250,7 +250,7 @@ async def run():
                         parts = user_input.split()
                         if len(parts) > 1 and parts[1] == "edit":
                             async def run_wizard():
-                                nonlocal settings, user_id, provider, api_key, model, embedding_model, dims, graph, store
+                                nonlocal settings, user_id, provider, api_key, model, model_name, embedding_model, dims
                                 try:
                                     new_settings = await first_run_setup(session)
                                     settings = new_settings
@@ -281,7 +281,7 @@ async def run():
                                     ui.set_model_name(model.provider if hasattr(model, 'provider') else provider)
                                     
                                     # Recompile graph
-                                    graph = build_graph(
+                                    graph_ref[0] = build_graph(
                                         model=model,
                                         checkpointer=checkpointer,
                                         store=store,
@@ -291,7 +291,7 @@ async def run():
                                 except Exception as err:
                                     ui.append_block(f"Error reloading settings: {err}")
                             
-                            await ui.app.run_in_terminal(run_wizard)
+                            await run_wizard()
                             continue
 
                         saved_settings = load_settings()
@@ -387,7 +387,84 @@ async def run():
                         ui.append_block("\n".join(lines))
                         continue
 
+                    if user_input == "/model" or user_input.startswith("/model "):
+                        from chatbot_cli.providers import PROVIDER_MODELS, DEFAULT_MODELS, SUPPORTED_PROVIDERS
+                        from prompt_toolkit.shortcuts import radiolist_dialog, input_dialog
 
+                        parts = user_input.split(maxsplit=1)
+                        # If the user typed /model <name> directly, use that name
+                        inline_model = parts[1].strip() if len(parts) > 1 else None
+
+                        if inline_model:
+                            new_model_name = inline_model
+                        else:
+                            # Show interactive picker
+                            models_list = PROVIDER_MODELS.get(provider, [])
+                            dialog_values = [(m, m) for m in models_list]
+                            dialog_values.append(("custom", "Custom model name..."))
+
+                            chosen = await radiolist_dialog(
+                                title=f"Switch Model — {SUPPORTED_PROVIDERS.get(provider, provider)}",
+                                text=(
+                                    f"Current model: {model_name or DEFAULT_MODELS.get(provider, '?')}\n\n"
+                                    "Use Up/Down to move, Space to select, Enter to confirm."
+                                ),
+                                values=dialog_values,
+                                default=model_name or DEFAULT_MODELS.get(provider, ""),
+                                ok_text="Switch",
+                                cancel_text="Cancel",
+                            ).run_async()
+
+                            if chosen is None:
+                                ui.append_block("Model switch cancelled.")
+                                continue
+
+                            if chosen == "custom":
+                                chosen = await input_dialog(
+                                    title="Custom Model Name",
+                                    text="Enter the exact model identifier (e.g. gpt-4o-mini, llama3.2:latest):",
+                                    default=model_name or "",
+                                    ok_text="Switch",
+                                    cancel_text="Cancel",
+                                ).run_async()
+                                if not chosen or not chosen.strip():
+                                    ui.append_block("Model switch cancelled.")
+                                    continue
+                                chosen = chosen.strip()
+
+                            new_model_name = chosen
+
+                        # Hot-reload the model and recompile the graph
+                        try:
+                            new_model, new_embed, new_dims = get_models(
+                                provider,
+                                api_key,
+                                model_name=new_model_name,
+                                embedding_provider=embedding_provider,
+                                embedding_model=embedding_model_name,
+                                api_keys=api_keys,
+                            )
+                            model = new_model
+                            model_name = new_model_name
+                            import chatbot_cli.providers as _prov
+                            _prov.ACTIVE_CHAT_MODEL = model
+                            graph_ref[0] = build_graph(
+                                model=model,
+                                checkpointer=checkpointer,
+                                store=store,
+                                tools=tools,
+                            )
+                            # Persist to settings.json
+                            saved = load_settings()
+                            saved["model"] = new_model_name
+                            from chatbot_cli.settings import save_settings
+                            save_settings(saved)
+
+                            ui.set_model_name(model.provider if hasattr(model, "provider") else provider)
+                            ui.append_block(f"Model switched to: {new_model_name}")
+                        except Exception as err:
+                            ui.append_block(f"Failed to switch model: {err}")
+                        continue
 
                     if user_input == "/skills":
                         from chatbot_cli.tool import load_skill_tools
@@ -504,7 +581,7 @@ async def run():
                     try:
                         attached_images = list(ui.pasted_images)
                         ui.pasted_images.clear()
-                        await stream_response(graph, user_input, config, ui, image_paths=attached_images)
+                        await stream_response(graph_ref[0], user_input, config, ui, image_paths=attached_images)
                     finally:
                         ui.set_status("")
 
