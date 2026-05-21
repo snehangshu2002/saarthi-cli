@@ -24,7 +24,7 @@ from chatbot_cli.tool import build_tools
 console = Console()
 
 # Version - kept in sync with pyproject.toml
-__version__ = "0.1.0"
+__version__ = "0.1.3"
 
 SAARTHI_LOGO = """
 ███████╗ █████╗  █████╗ ██████╗ ████████╗██╗  ██╗██╗
