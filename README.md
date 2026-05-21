@@ -64,6 +64,7 @@ No browser. No Electron. No cloud dashboard.
 | `tavily_search` | Tavily AI-powered search (requires API key)         |
 | `delegate_task` | Spawn a specialized sub-agent for a sub-task        |
 | `save_skill`    | Save a Python script as a reusable dynamic tool     |
+| `save_md_skill` | Save a Markdown prompt as a reusable dynamic tool   |
 | `skill_<name>`  | Any skill you (or the AI) saved in `skills/`        |
 
 ---
@@ -150,8 +151,6 @@ Contents:
 | `/export [filepath]`           | Export current chat transcript to a text file            |
 | `/skills`                      | List all saved skills with descriptions                  |
 | `/skill run <name> [args...]`  | Run a skill directly from the CLI                        |
-| `/skill show <name>`           | Print the source code of a saved skill                   |
-| `/skill delete <name>`         | Permanently delete a saved skill                         |
 | `/exit`                        | Quit Saarthi                                             |
 
 ---
@@ -242,12 +241,12 @@ Skills are custom Python scripts or Markdown files saved in the `skills/` direct
    ```
    Save a skill named "disk_usage" that prints disk usage for the current directory.
    ```
-   The AI calls the `save_skill` tool with:
+   The AI calls the `save_skill` (or `save_md_skill`) tool with:
    - `name` — the skill name (alphanumeric + underscores)
    - `description` — used as the tool's docstring and shown in `/skills`
-   - `python_code` — a standalone Python script (can read `sys.argv` for arguments)
+   - `python_code` or `instructions` — the code or prompt text
 
-   The file is written to `skills/disk_usage.py`.
+   The file is written to `skills/disk_usage.py` or `skills/humanizer.md`.
 
 2. **Running a skill via the AI** — In the very next message, the AI can invoke `skill_disk_usage()` directly as a tool.
 
@@ -261,41 +260,18 @@ Skills are custom Python scripts or Markdown files saved in the `skills/` direct
    ```
    /skills
    ```
-   Output:
-   ```
-   Saved skills (2):
-     skill_disk_usage  —  Print disk usage for the current directory.
-     skill_greet       —  Greet a user by name with a friendly message.
+   This opens an interactive UI picker where you can browse all saved skills and their descriptions, and select one to run.
 
-   Use /skill run <name> [args] to execute a skill.
-   Use /skill show <name> to see its source code.
-   Use /skill delete <name> to remove it.
-   ```
+### Skill Formats
 
-5. **Viewing skill source:**
-   ```
-   /skill show greet
-   ```
+*Python skills run in an isolated subprocess — they cannot affect the main process state.*
 
-6. **Deleting a skill:**
-   ```
-   /skill delete greet
-   ```
+**Markdown Prompts (.md):** Use plain text instructions for the LLM. 
+When executed, the AI uses these instructions directly to process your input without running any code:
 
-### Skill Script Format
-
-Skills are plain Python scripts. Use `sys.argv` to receive arguments:
-
-```python
-"""Greet a user by name with a friendly message. Accepts the name as argument."""
-
-import sys
-
-name = sys.argv[1] if len(sys.argv) > 1 else "World"
-print(f"Hello, {name}! Great to have you here.")
+```markdown
+Translate the provided text into pirate speak.
 ```
-
-Skills run in an isolated subprocess — they cannot affect the main process state.
 
 ---
 
