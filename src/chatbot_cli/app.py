@@ -98,9 +98,22 @@ async def run():
     user_id = settings["username"]
     provider = settings["provider"]
     api_key = settings["api_key"]
+    model_name = settings.get("model")
+    embedding_provider = settings.get("embedding_provider")
+    embedding_model_name = settings.get("embedding_model")
+    api_keys = settings.get("api_keys", {})
 
     try:
-        model, embedding_model, dims = get_models(provider, api_key)
+        model, embedding_model, dims = get_models(
+            provider,
+            api_key,
+            model_name=model_name,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model_name,
+            api_keys=api_keys,
+        )
+        import chatbot_cli.providers
+        chatbot_cli.providers.ACTIVE_CHAT_MODEL = model
     except Exception as e:
         console.print(f"[red]Failed to load provider '{provider}': {e}[/]")
         console.print("[dim]Edit settings.json and restart.[/]")
@@ -233,12 +246,68 @@ async def run():
                         ui.append_block("\n".join(lines))
                         continue
 
-                    if user_input == "/settings":
+                    if user_input == "/settings" or user_input.startswith("/settings "):
+                        parts = user_input.split()
+                        if len(parts) > 1 and parts[1] == "edit":
+                            async def run_wizard():
+                                nonlocal settings, user_id, provider, api_key, model, embedding_model, dims, graph, store
+                                try:
+                                    new_settings = await first_run_setup(session)
+                                    settings = new_settings
+                                    user_id = settings["username"]
+                                    provider = settings["provider"]
+                                    api_key = settings["api_key"]
+                                    m_name = settings.get("model")
+                                    e_prov = settings.get("embedding_provider")
+                                    e_mod = settings.get("embedding_model")
+                                    a_keys = settings.get("api_keys", {})
+
+                                    new_model, new_embed, new_dims = get_models(
+                                        provider,
+                                        api_key,
+                                        model_name=m_name,
+                                        embedding_provider=e_prov,
+                                        embedding_model=e_mod,
+                                        api_keys=a_keys,
+                                    )
+                                    
+                                    # Hot reload components
+                                    model = new_model
+                                    import chatbot_cli.providers
+                                    chatbot_cli.providers.ACTIVE_CHAT_MODEL = model
+                                    embedding_model = new_embed
+                                    dims = new_dims
+                                    store.index = {"embed": new_embed, "dims": new_dims}
+                                    ui.set_model_name(model.provider if hasattr(model, 'provider') else provider)
+                                    
+                                    # Recompile graph
+                                    graph = build_graph(
+                                        model=model,
+                                        checkpointer=checkpointer,
+                                        store=store,
+                                        tools=tools,
+                                    )
+                                    ui.append_block("Settings updated and model reloaded successfully!")
+                                except Exception as err:
+                                    ui.append_block(f"Error reloading settings: {err}")
+                            
+                            await ui.app.run_in_terminal(run_wizard)
+                            continue
+
                         saved_settings = load_settings()
                         lines = ["Current settings:"]
                         for key, value in saved_settings.items():
-                            display = value[:6] + "..." if key == "api_key" and len(value) > 6 else value
+                            if key == "api_key":
+                                display = value[:6] + "..." + value[-4:] if len(value) > 10 else ("****" if value else "(not set)")
+                            elif key == "api_keys":
+                                masked_map = {}
+                                for pk, pv in value.items():
+                                    masked_map[pk] = pv[:6] + "..." + pv[-4:] if len(pv) > 10 else "****"
+                                display = str(masked_map)
+                            else:
+                                display = str(value)
                             lines.append(f"  {key}: {display}")
+                        lines.append("\nType '/settings edit' to update settings.")
                         ui.append_block("\n".join(lines))
                         continue
 
@@ -264,6 +333,33 @@ async def run():
                             sessions,
                             "Use Up/Down and Enter to resume. Esc or Ctrl+C cancels.",
                         )
+                        continue
+
+                    if user_input == "/export" or user_input.startswith("/export "):
+                        parts = user_input.split(maxsplit=1)
+                        if len(parts) > 1:
+                            filepath = parts[1].strip()
+                        else:
+                            import datetime
+                            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filepath = f"chat_export_{ts}.txt"
+
+                        try:
+                            from pathlib import Path
+                            export_path = Path(filepath).resolve()
+                            export_path.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            clean_text = ui.get_clean_transcript_text()
+                            export_path.write_text(clean_text, encoding="utf-8")
+                            ui.append_block(f"Successfully exported chat to: {export_path}")
+                        except Exception as e:
+                            ui.append_block(f"Failed to export chat: {e}")
+                        continue
+
+                    if user_input == "/plan":
+                        ui.plan_mode = not ui.plan_mode
+                        status = "enabled" if ui.plan_mode else "disabled"
+                        ui.append_block(f"Plan Mode {status}.")
                         continue
 
                     if user_input == "/mcp":
@@ -297,7 +393,9 @@ async def run():
                         ui.append_block(f"Unknown command: {user_input}. Type /help.")
                         continue
                     try:
-                        await stream_response(graph, user_input, config, ui)
+                        attached_images = list(ui.pasted_images)
+                        ui.pasted_images.clear()
+                        await stream_response(graph, user_input, config, ui, image_paths=attached_images)
                     finally:
                         ui.set_status("")
 
@@ -327,6 +425,21 @@ async def check_for_updates(current_version: str):
         pass  # network unavailable or unexpected API response — silently skip
     
 def main():
+    import logging
+    from chatbot_cli.app_config import USER_DATA_DIR
+
+    # Redirect logging to a local file instead of stderr to prevent TUI screen pollution
+    try:
+        USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            filename=str(USER_DATA_DIR / "saarthi.log"),
+            level=logging.ERROR,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
+    except Exception:
+        # Fallback if log directory/file is not writable, just suppress root logger outputs
+        logging.basicConfig(handlers=[logging.NullHandler()])
+
     try:
         asyncio.run(run())
     except (KeyboardInterrupt, asyncio.CancelledError):
