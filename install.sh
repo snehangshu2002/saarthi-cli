@@ -65,6 +65,14 @@ install_saarthi() {
         return
     fi
 
+    # Fall back to pipx (standard for Python CLI tools)
+    if command -v pipx &> /dev/null; then
+        info "Using pipx..."
+        pipx install saarthi-cli
+        info "Done! Run 'saarthi' to start."
+        return
+    fi
+
     # Fall back to pip --user
     if $PYTHON -m pip --version &> /dev/null 2>&1; then
         info "Using pip..."
