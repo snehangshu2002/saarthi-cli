@@ -574,7 +574,6 @@ async def run():
                             from chatbot_cli.app_config import SKILLS_DIR
                             skill_py = SKILLS_DIR / f"{skill_name}.py"
                             skill_md = SKILLS_DIR / f"{skill_name}.md"
-                            skill_md = skills_dir / f"{skill_name}.md"
 
                             if skill_py.exists():
                                 import subprocess
@@ -634,10 +633,9 @@ async def run():
                                 ui.append_block("Usage: /skill delete <name>")
                                 continue
                             skill_name = parts[2].strip()
-                            from pathlib import Path
-                            skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
-                            skill_py = skills_dir / f"{skill_name}.py"
-                            skill_md = skills_dir / f"{skill_name}.md"
+                            from chatbot_cli.app_config import SKILLS_DIR
+                            skill_py = SKILLS_DIR / f"{skill_name}.py"
+                            skill_md = SKILLS_DIR / f"{skill_name}.md"
 
                             if skill_py.exists():
                                 try:
