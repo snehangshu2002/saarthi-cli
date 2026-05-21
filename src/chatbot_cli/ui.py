@@ -9,7 +9,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout import HSplit, Layout, Window, Dimension
 from prompt_toolkit.layout.containers import Float, FloatContainer
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
@@ -410,7 +410,8 @@ class ChatUI:
                 self.input,                                     
                 Window(height=1, char="─", style="fg:#262626"), 
                 Window(height=1, content=FormattedTextControl(self._get_status_bar_text)), 
-            ]
+            ],
+            width=Dimension(min=60)
         )
 
         layout = FloatContainer(
@@ -589,6 +590,19 @@ class ChatUI:
                 if self._pending_input is not None and not self._pending_input.done():
                     self._pending_input.set_result("__cancel_select__")
 
+        @bindings.add("?")
+        def _(event):
+            buffer = event.app.current_buffer
+            # If the input is completely empty, show the shortcuts menu in the status bar
+            if buffer.text == "":
+                self.set_status(
+                    "Shortcuts: Ctrl+O (Toggle Details) | Ctrl+Space (Copy Mode) | Tab (Switch Focus) | Ctrl+C (Exit)",
+                    show_spinner=False
+                )
+                self.app.invalidate()
+            else:
+                buffer.insert_text("?")
+
         @bindings.add("c-space")
         def _(event):
             """Start keyboard selection mode to allow copying text."""
@@ -714,12 +728,8 @@ class ChatUI:
         else:
             left_parts = [
                 ("fg:#666666", "  "),
-                ("fg:#888888 bold", "Ctrl+O"),
-                ("fg:#555555", " Toggle Details  │  "),
-                ("fg:#888888 bold", "Ctrl+Space"),
-                ("fg:#555555", " Copy Mode  │  "),
-                ("fg:#888888 bold", "Tab"),
-                ("fg:#555555", " Switch Focus"),
+                ("fg:#888888 bold", "?"),
+                ("fg:#555555", " Shortcuts"),
             ]
 
         provider_map = {
