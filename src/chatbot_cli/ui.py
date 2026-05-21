@@ -55,6 +55,60 @@ def get_friendly_tool_name(name: str) -> str:
 # Global tracking of active TUI
 ACTIVE_CHAT_UI = None
 
+
+def _grab_clipboard_image():
+    """
+    Try to get an image from the Windows clipboard.
+    Returns (filepath: str, filename: str) on success, or (None, error_msg: str) on failure.
+
+    Handles three cases:
+      1. PIL.Image   — image data directly in clipboard (screenshot, copy from browser/viewer)
+      2. list        — file paths in clipboard (image file copied from Explorer)
+      3. None / other — no image in clipboard
+    """
+    import datetime
+    from pathlib import Path
+    from chatbot_cli.app_config import USER_DATA_DIR
+
+    try:
+        from PIL import ImageGrab, Image
+
+        img = ImageGrab.grabclipboard()
+
+        # ── Case 1: actual pixel data ──────────────────────────────────────
+        if isinstance(img, Image.Image):
+            images_dir = USER_DATA_DIR / "images"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"copied_image_{timestamp}.png"
+            filepath = images_dir / filename
+            img.save(filepath, "PNG")
+            return str(filepath), filename
+
+        # ── Case 2: list of file paths (copied from Explorer) ─────────────
+        if isinstance(img, list):
+            IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif",
+                          ".webp", ".tiff", ".tif", ".ico"}
+            for item in img:
+                p = Path(str(item))
+                if p.suffix.lower() in IMAGE_EXTS and p.exists():
+                    images_dir = USER_DATA_DIR / "images"
+                    images_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"copied_image_{timestamp}{p.suffix.lower()}"
+                    dest = images_dir / filename
+                    import shutil
+                    shutil.copy2(str(p), str(dest))
+                    return str(dest), filename
+            # list contained no image files
+            return None, ""
+
+        # ── Case 3: None / non-image clipboard content ─────────────────────
+        return None, ""
+
+    except Exception as e:
+        return None, f"Clipboard image error: {e}"
+
 # Monkey-patch MouseHandlers.set_mouse_handler_for_range to intercept all mouse events globally.
 original_set_mouse_handler_for_range = MouseHandlers.set_mouse_handler_for_range
 
@@ -88,32 +142,21 @@ def new_set_mouse_handler_for_range(self, x_min, x_max, y_min, y_max, handler):
                 ACTIVE_CHAT_UI.transcript.buffer.exit_selection()
                 ACTIVE_CHAT_UI.app.layout.focus(ACTIVE_CHAT_UI.input)
             else:
-                try:
-                    from PIL import ImageGrab, Image
-                    import datetime
-                    img = ImageGrab.grabclipboard()
-                    if isinstance(img, Image.Image):
-                        from chatbot_cli.app_config import USER_DATA_DIR
-                        images_dir = USER_DATA_DIR / "images"
-                        images_dir.mkdir(parents=True, exist_ok=True)
-                        
-                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = f"copied_image_{timestamp}.png"
-                        filepath = images_dir / filename
-                        img.save(filepath, "PNG")
-                        
-                        ACTIVE_CHAT_UI.pasted_images.append(str(filepath))
-                        ACTIVE_CHAT_UI.input.buffer.insert_text(f" [Image Pasted: {filename}] ")
-                        ACTIVE_CHAT_UI.set_status(f"Image pasted and saved to {filename}")
-                        ACTIVE_CHAT_UI.app.layout.focus(ACTIVE_CHAT_UI.input)
-                        ACTIVE_CHAT_UI.app.invalidate()
-                        return None
-                except Exception:
-                    pass
-
-                data = ACTIVE_CHAT_UI.app.clipboard.get_data()
-                if data and data.text:
-                    ACTIVE_CHAT_UI.input.buffer.insert_text(data.text)
+                filepath, filename = _grab_clipboard_image()
+                if filepath:
+                    ACTIVE_CHAT_UI.pasted_images.append(filepath)
+                    ACTIVE_CHAT_UI.input.buffer.insert_text(f" [Image Pasted: {filename}] ")
+                    ACTIVE_CHAT_UI.set_status(f"Image pasted: {filename}")
+                    ACTIVE_CHAT_UI.app.layout.focus(ACTIVE_CHAT_UI.input)
+                    ACTIVE_CHAT_UI.app.invalidate()
+                    return None
+                elif filename:  # non-empty means an error string was returned
+                    ACTIVE_CHAT_UI.set_status(filename, show_spinner=False)
+                else:
+                    # No image — fall back to text paste
+                    data = ACTIVE_CHAT_UI.app.clipboard.get_data()
+                    if data and data.text:
+                        ACTIVE_CHAT_UI.input.buffer.insert_text(data.text)
                 ACTIVE_CHAT_UI.app.layout.focus(ACTIVE_CHAT_UI.input)
             ACTIVE_CHAT_UI.app.invalidate()
             return None
@@ -580,31 +623,21 @@ class ChatUI:
             """Handle pasting text or images into the input field."""
             if not self.app.layout.has_focus(self.input):
                 self.app.layout.focus(self.input)
-            
-            try:
-                from PIL import ImageGrab, Image
-                import datetime
-                img = ImageGrab.grabclipboard()
-                if isinstance(img, Image.Image):
-                    from chatbot_cli.app_config import USER_DATA_DIR
-                    images_dir = USER_DATA_DIR / "images"
-                    images_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"copied_image_{timestamp}.png"
-                    filepath = images_dir / filename
-                    img.save(filepath, "PNG")
-                    
-                    self.pasted_images.append(str(filepath))
-                    self.input.buffer.insert_text(f" [Image Pasted: {filename}] ")
-                    self.set_status(f"Image pasted and saved to {filename}")
-                    self.app.invalidate()
-                    return
-            except Exception:
-                pass
 
+            filepath, filename = _grab_clipboard_image()
+            if filepath:
+                self.pasted_images.append(filepath)
+                self.input.buffer.insert_text(f" [Image Pasted: {filename}] ")
+                self.set_status(f"Image pasted: {filename}")
+                self.app.invalidate()
+                return
+            elif filename:  # non-empty error message
+                self.set_status(filename, show_spinner=False)
+                return
+
+            # No image — fall back to text paste
             data = event.app.clipboard.get_data()
-            if data.text:
+            if data and data.text:
                 self.input.buffer.insert_text(data.text)
 
         @bindings.add("c-o")
