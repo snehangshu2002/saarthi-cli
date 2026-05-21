@@ -37,8 +37,10 @@ COMMANDS = {
     "/new": "Start a new conversation",
     "/resume": "Resume an older conversation",
     "/mcp": "List connected MCP servers and their tools",
+    "/export": "Export current chat history to a text file",
+    "/plan": "Toggle Plan Mode (AI plans steps before tool execution)",
     "/help": "Show available commands",
-    "/settings": "Show current settings",
+    "/settings": "Show current settings (run '/settings edit' to update)",
 }
 
 APP_STYLE = Style.from_dict(
