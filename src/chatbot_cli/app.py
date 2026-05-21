@@ -269,6 +269,25 @@ async def run():
                             ui.app.layout.focus(ui.input)
                             continue
 
+                        elif mode == "mcp":
+                            selected_tool_name = selected["value"]
+                            tool_details = "No details available."
+                            for t in tools:
+                                if t.name == selected_tool_name:
+                                    desc = getattr(t, "description", "No description")
+                                    args_schema = ""
+                                    if hasattr(t, "args_schema") and t.args_schema:
+                                        try:
+                                            import json
+                                            schema = t.args_schema.schema()
+                                            args_schema = "\n\nArguments:\n" + json.dumps(schema.get("properties", {}), indent=2)
+                                        except Exception:
+                                            pass
+                                    tool_details = desc + args_schema
+                                    break
+                            ui.append_block(f"MCP Tool: {selected_tool_name}\n\n{tool_details}")
+                            continue
+
                     ui.append_block(f"> {user_input}")
 
                     if user_input == "/exit":
@@ -423,28 +442,30 @@ async def run():
                         continue
 
                     if user_input == "/mcp":
-                        lines = ["Connected MCP servers and tools:"]
-                        mcp_tool_names = [
-                            t.name for t in tools
-                            if hasattr(t, "_is_mcp") or "mcp" in getattr(t, "name", "").lower()
-                            or getattr(t, "tags", None) and "mcp" in (getattr(t, "tags", None) or [])
+                        builtin_names = {"bash", "calculator", "tavily_search_results_json", 
+                                         "duckduckgo_search", "wikipedia", "arxiv", "fetch_webpage",
+                                         "delegate_task", "save_skill", "save_md_skill"}
+                        
+                        mcp_tools_list = [
+                            t for t in tools
+                            if t.name not in builtin_names and not t.name.startswith("skill_")
                         ]
-                        # Separate built-in from MCP tools
-                        builtin_names = {"bash", "calculator", "tavily-search", "duckduckgo-search",
-                                         "wikipedia", "arxiv"}
-                        mcp_tools_list = [t for t in tools if t.name not in builtin_names]
-                        builtin_list   = [t for t in tools if t.name in builtin_names]
-                        if mcp_tools_list:
-                            for t in mcp_tools_list:
-                                desc = (getattr(t, "description", "") or "").splitlines()[0][:60]
-                                lines.append(f"  [MCP] {t.name}  —  {desc}")
-                        else:
-                            lines.append("  (no MCP servers connected — edit mcp_config.json)")
-                        lines.append("")
-                        lines.append("Built-in tools:")
-                        for t in builtin_list:
-                            lines.append(f"  {t.name}")
-                        ui.append_block("\n".join(lines))
+                        
+                        if not mcp_tools_list:
+                            ui.append_block("No MCP servers connected. Edit mcp_config.json to add servers.")
+                            continue
+
+                        dialog_values = []
+                        for t in mcp_tools_list:
+                            desc = (getattr(t, "description", "") or "").splitlines()[0][:60]
+                            dialog_values.append({"label": f"[MCP] {t.name}  —  {desc}", "value": t.name})
+
+                        active_selection_mode = "mcp"
+                        ui.start_selection(
+                            f"Connected MCP Tools ({len(mcp_tools_list)}):",
+                            dialog_values,
+                            "Use Up/Down to select, Enter to view tool details. Esc cancels."
+                        )
                         continue
 
                     if user_input == "/model" or user_input.startswith("/model "):
