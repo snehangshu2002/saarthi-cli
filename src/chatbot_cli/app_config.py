@@ -46,6 +46,7 @@ COMMANDS = {
     "/skill show": "Show source code of a skill: /skill show <name>",
     "/skill delete": "Delete a saved skill: /skill delete <name>",
     "/model": "Switch the chat model for the current session",
+    "/image": "Attach an image from your clipboard to the next message",
 }
 
 APP_STYLE = Style.from_dict(
