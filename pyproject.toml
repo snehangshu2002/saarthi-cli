@@ -53,6 +53,7 @@ dependencies = [
     "rich>=15.0.0",
     "wikipedia>=1.4.0",
     "langchain-mistralai>=1.1.4",
+    "Pillow>=10.3.0",
 ]
 
 [project.scripts]
