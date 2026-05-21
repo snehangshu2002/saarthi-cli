@@ -316,15 +316,12 @@ def save_skill(name: str, description: str, python_code: str) -> str:
                    It can accept arguments from command line (sys.argv) or stdin if needed.
     """
     import re
-    from pathlib import Path
+    from chatbot_cli.app_config import SKILLS_DIR
     
     if not re.match(r"^[a-zA-Z0-9_]+$", name):
         return "ERROR: Skill name must contain only alphanumeric characters and underscores."
         
-    skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    
-    filepath = skills_dir / f"{name}.py"
+    filepath = SKILLS_DIR / f"{name}.py"
     content = f'"""{description}"""\n\n{python_code}\n'
     
     try:
@@ -332,6 +329,27 @@ def save_skill(name: str, description: str, python_code: str) -> str:
         return f"SUCCESS: Skill '{name}' saved successfully to {filepath}."
     except Exception as e:
         return f"ERROR: Failed to save skill: {e}"
+
+@tool
+def save_md_skill(name: str, instructions: str) -> str:
+    """Save a text-based prompt or instruction set as a Markdown (.md) skill in the skills/ directory.
+    - name: The name of the skill (e.g. 'summarize', 'translate'). Use alphanumeric/underscores only.
+    - instructions: The text prompt or instructions the LLM should follow when executing this skill.
+    This is best used for prompt-based tasks where you want the LLM to process input natively, rather than using Python.
+    """
+    import re
+    from chatbot_cli.app_config import SKILLS_DIR
+    
+    if not re.match(r"^[a-zA-Z0-9_]+$", name):
+        return "ERROR: Skill name must contain only alphanumeric characters and underscores."
+        
+    filepath = SKILLS_DIR / f"{name}.md"
+    
+    try:
+        filepath.write_text(instructions, encoding="utf-8")
+        return f"SUCCESS: MD Skill '{name}' saved successfully to {filepath}."
+    except Exception as e:
+        return f"ERROR: Failed to save MD skill: {e}"
 
 
 def make_skill_tool(skill_name: str, docstring: str, filepath: str):
@@ -380,15 +398,14 @@ def make_skill_tool(skill_name: str, docstring: str, filepath: str):
 
 
 def load_skill_tools() -> list:
-    from pathlib import Path
     import ast
+    from chatbot_cli.app_config import SKILLS_DIR
     
-    skills_dir = Path(__file__).resolve().parent.parent.parent / "skills"
-    if not skills_dir.exists():
+    if not SKILLS_DIR.exists():
         return []
         
     skill_tools = []
-    for filepath in skills_dir.glob("*.py"):
+    for filepath in SKILLS_DIR.glob("*.py"):
         skill_name = filepath.stem
         try:
             code = filepath.read_text(encoding="utf-8")
@@ -446,4 +463,4 @@ async def build_tools():
     global SUBAGENT_TOOLS
     SUBAGENT_TOOLS = all_tools
     
-    return all_tools + [delegate_task, save_skill]
+    return all_tools + [delegate_task, save_skill, save_md_skill]
