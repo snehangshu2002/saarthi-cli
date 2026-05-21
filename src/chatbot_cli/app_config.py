@@ -20,6 +20,8 @@ def get_user_data_dir() -> Path:
 USER_DATA_DIR = get_user_data_dir()
 SETTINGS_FILE = str(USER_DATA_DIR / "settings.json")
 DATA_DIR = str(USER_DATA_DIR / "data")
+SKILLS_DIR = USER_DATA_DIR / "skills"
+SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
 STATUS_MESSAGES = [
     "Thinking...",
@@ -42,9 +44,6 @@ COMMANDS = {
     "/help": "Show available commands",
     "/settings": "Show current settings (run '/settings edit' to update)",
     "/skills": "List all saved skills",
-    "/skill run": "Run a skill directly: /skill run <name> [args...]",
-    "/skill show": "Show source code of a skill: /skill show <name>",
-    "/skill delete": "Delete a saved skill: /skill delete <name>",
     "/model": "Switch the chat model for the current session",
     "/image": "Attach an image from your clipboard to the next message",
 }
