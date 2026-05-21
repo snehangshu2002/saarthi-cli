@@ -14,9 +14,11 @@ from prompt_toolkit.layout.containers import Float, FloatContainer
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import Processor, Transformation
-from prompt_toolkit.mouse_events import MouseEventType
+from prompt_toolkit.mouse_events import MouseEventType, MouseButton
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.selection import SelectionType
+from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+from prompt_toolkit.filters import has_focus
 
 from chatbot_cli.app_config import APP_STYLE, COMMANDS
 from chatbot_cli.clipboard import WindowsClipboard
@@ -33,6 +35,113 @@ STATUS_MESSAGES = [
     "Processing...",
     "Building answer...",
 ]
+
+# Unicode markers for semantic line types to bypass regex-based styling
+THOUGHT_BODY_MARKER = "\u2001"
+TOOL_BODY_MARKER = "\u2002"
+THOUGHT_HEADER_MARKER = "\u2003"
+TOOL_HEADER_MARKER = "\u2004"
+HINT_MARKER = "\u2005"
+
+def get_friendly_tool_name(name: str) -> str:
+    """Map raw tool names to clean, user-friendly display names."""
+    mapping = {
+        "duckduckgo_search": "Search",
+        "tavily_search_results_json": "Search",
+        "tavily_search": "Search",
+    }
+    return mapping.get(name, name)
+
+# Global tracking of active TUI
+ACTIVE_CHAT_UI = None
+
+# Monkey-patch MouseHandlers.set_mouse_handler_for_range to intercept all mouse events globally.
+original_set_mouse_handler_for_range = MouseHandlers.set_mouse_handler_for_range
+
+def new_set_mouse_handler_for_range(self, x_min, x_max, y_min, y_max, handler):
+    import sys
+    caller_self = None
+    try:
+        caller_self = sys._getframe(1).f_locals.get('self')
+    except Exception:
+        pass
+
+    def wrapped_handler(mouse_event):
+        if not ACTIVE_CHAT_UI:
+            return handler(mouse_event)
+
+        # 1. Universal mouse scroll anywhere scrolls the transcript
+        if mouse_event.event_type in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+            amount = -3 if mouse_event.event_type == MouseEventType.SCROLL_UP else 3
+            ACTIVE_CHAT_UI._scroll_transcript(amount)
+            return None
+
+        # 2. Right-click copy/paste globally
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.RIGHT:
+            if ACTIVE_CHAT_UI.transcript.buffer.selection_state:
+                try:
+                    data = ACTIVE_CHAT_UI.transcript.buffer.copy_selection()
+                    ACTIVE_CHAT_UI.app.clipboard.set_data(data)
+                    ACTIVE_CHAT_UI.set_status("Copied to clipboard!")
+                except Exception as e:
+                    ACTIVE_CHAT_UI.set_status(f"Copy failed: {e}", show_spinner=False)
+                ACTIVE_CHAT_UI.transcript.buffer.exit_selection()
+                ACTIVE_CHAT_UI.app.layout.focus(ACTIVE_CHAT_UI.input)
+            else:
+                try:
+                    from PIL import ImageGrab, Image
+                    import datetime
+                    img = ImageGrab.grabclipboard()
+                    if isinstance(img, Image.Image):
+                        from chatbot_cli.app_config import USER_DATA_DIR
+                        images_dir = USER_DATA_DIR / "images"
+                        images_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"copied_image_{timestamp}.png"
+                        filepath = images_dir / filename
+                        img.save(filepath, "PNG")
+                        
+                        ACTIVE_CHAT_UI.pasted_images.append(str(filepath))
+                        ACTIVE_CHAT_UI.input.buffer.insert_text(f" [Image Pasted: {filename}] ")
+                        ACTIVE_CHAT_UI.set_status(f"Image pasted and saved to {filename}")
+                        ACTIVE_CHAT_UI.app.layout.focus(ACTIVE_CHAT_UI.input)
+                        ACTIVE_CHAT_UI.app.invalidate()
+                        return None
+                except Exception:
+                    pass
+
+                data = ACTIVE_CHAT_UI.app.clipboard.get_data()
+                if data and data.text:
+                    ACTIVE_CHAT_UI.input.buffer.insert_text(data.text)
+                ACTIVE_CHAT_UI.app.layout.focus(ACTIVE_CHAT_UI.input)
+            ACTIVE_CHAT_UI.app.invalidate()
+            return None
+
+        # 3. Left-click down on transcript focuses transcript control to allow drag selection
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+            if caller_self == ACTIVE_CHAT_UI.transcript.window:
+                ACTIVE_CHAT_UI.app.layout.current_control = ACTIVE_CHAT_UI.transcript.control
+            else:
+                # Clicking elsewhere clears the selection
+                ACTIVE_CHAT_UI.transcript.buffer.exit_selection()
+                ACTIVE_CHAT_UI.app.invalidate()
+
+        # Run original mouse handler
+        result = handler(mouse_event)
+
+        # 4. Left-click up on transcript focuses input if no selection was made
+        if mouse_event.event_type == MouseEventType.MOUSE_UP and mouse_event.button == MouseButton.LEFT:
+            if caller_self == ACTIVE_CHAT_UI.transcript.window:
+                if not ACTIVE_CHAT_UI.transcript.buffer.selection_state:
+                    ACTIVE_CHAT_UI.app.layout.focus(ACTIVE_CHAT_UI.input)
+
+        return result
+
+    original_set_mouse_handler_for_range(self, x_min, x_max, y_min, y_max, wrapped_handler)
+
+MouseHandlers.set_mouse_handler_for_range = new_set_mouse_handler_for_range
+
 
 class SlashCommandCompleter(Completer):
     """Show slash commands only while typing a command at the prompt."""
@@ -55,24 +164,101 @@ class SlashCommandCompleter(Completer):
 class TranscriptProcessor(Processor):
     """Highlights different types of lines in the transcript."""
 
+    def __init__(self, ui_instance):
+        super().__init__()
+        self.ui = ui_instance
+
     def apply_transformation(self, transformation_input):
         fragments = transformation_input.fragments
         line_text = "".join(text for _, text, *_ in fragments)
 
-        # 1. BOT MESSAGE PREFIX: Highlight the chevron in bold orange
-        if line_text.startswith("❯ "):
-            return Transformation([
-                ("fg:#ffaa00 bold", "❯ "),
-                ("", line_text[2:])
-            ])
+        # Check first character for custom formatting markers
+        marker = line_text[:1]
+        if marker in ("\u2001", "\u2002", "\u2003", "\u2004", "\u2005"):
+            clean_text = line_text[1:]
+            
+            if marker == "\u2003":  # Thought Header
+                return Transformation([
+                    ("fg:#ff8c00 bold", "▸ "),
+                    ("fg:#ffaa00 bold", clean_text[2:])
+                ])
+            elif marker == "\u2001":  # Thought Body
+                return Transformation([("fg:#888888 italic", clean_text)])
+                
+            elif marker == "\u2004":  # Tool Header
+                idx = clean_text.find("(")
+                if idx != -1:
+                    tool_name = clean_text[2:idx]
+                    rest = clean_text[idx:]
+                    
+                    # Detect collapsed or expanded hint inline in tool header
+                    hint_suffix = ""
+                    for hint in (" (ctrl+o to expand)", " (ctrl+o to collapse)"):
+                        if hint in rest:
+                            rest = rest.replace(hint, "")
+                            hint_suffix = hint
+                            break
+                            
+                    fragments = [
+                        ("fg:#00aaff bold", "● "),
+                        ("fg:#00ffff bold", tool_name),
+                        ("fg:#cccccc", rest)
+                    ]
+                    if hint_suffix:
+                        fragments.append(("fg:#555555 italic", hint_suffix))
+                    return Transformation(fragments)
+                return Transformation([
+                    ("fg:#00aaff bold", "● "),
+                    ("fg:#00ffff bold", clean_text[2:])
+                ])
+                
+            elif marker == "\u2002":  # Tool Body
+                first_char = clean_text[:1]
+                if first_char in ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"):
+                    return Transformation([
+                        ("fg:#00ffff bold", "  " + first_char),
+                        ("fg:#888888 italic", clean_text[1:])
+                    ])
+                elif "Tip: Press ctrl+g" in clean_text:
+                    idx = clean_text.find("Tip:")
+                    return Transformation([
+                        ("fg:#555555", clean_text[:idx]),
+                        ("fg:#888888 bold", "Tip:"),
+                        ("fg:#555555 italic", clean_text[idx+4:])
+                    ])
+                elif "───" in clean_text:
+                    return Transformation([("fg:#262626", clean_text)])
+                    
+                return Transformation([("fg:#bbbbbb", clean_text)])
+                
+            elif marker == "\u2005":  # Hint
+                return Transformation([("fg:#666666 italic", clean_text)])
 
-        if line_text.startswith("> "):
-            pad_length = max(0, transformation_input.width - len(line_text))
-            styled_line = line_text + (" " * pad_length)
+        # 1. BOT MESSAGE PREFIX: Highlight and style with Left-Border Track and dynamic provider theme color
+        if line_text.startswith("❯ "):
+            clean_text = line_text[2:]
+            theme_color = self.ui._get_theme_color()
             return Transformation(
-                [("class:user-line", styled_line)],
-                source_to_display=lambda i: i,
-                display_to_source=lambda i: min(i, len(line_text)),
+                [
+                    ("fg:" + theme_color + " bold", "▌ "),
+                    ("fg:" + theme_color + " bold", "Saarthi: "),
+                    ("", clean_text)
+                ],
+                source_to_display=lambda i: 0 if i <= 1 else i + 9,
+                display_to_source=lambda i: 0 if i < 11 else min(i - 9, len(line_text))
+            )
+
+        # 2. USER MESSAGE PREFIX: Left-Border track with Indigo/Purple accent style
+        if line_text.startswith("> "):
+            clean_text = line_text[2:]
+            return Transformation(
+                [
+                    ("fg:#6366f1 bold", "▌ "),
+                    ("fg:#818cf8 bold", "You: "),
+                    ("", clean_text)
+                ],
+                source_to_display=lambda i: 0 if i <= 1 else i + 5,
+                display_to_source=lambda i: 0 if i < 7 else min(i - 5, len(line_text))
             )
             
         elif line_text[:1] in ["\u200c", "\u200d", "\u200e", "\u200f", "\u202a", "\u202b"]:
@@ -92,6 +278,7 @@ class TranscriptProcessor(Processor):
             return Transformation([("fg:#ffaa00", line_text)])
 
         return Transformation(fragments)
+
 
 
 def build_key_bindings() -> KeyBindings:
@@ -118,12 +305,16 @@ def create_chat_session() -> PromptSession:
 
 class ChatUI:
     def __init__(self):
+        global ACTIVE_CHAT_UI
+        ACTIVE_CHAT_UI = self
+
         self._history = InMemoryHistory()
         self._transcript_text = ""
         
         self._chunks = []  
         self._tool_blocks = []   
         self._tool_expanded = set()  
+        self._thought_blocks = []
         
         self._pending_input = None
         self._status = ""
@@ -133,6 +324,7 @@ class ChatUI:
         self._spinner_active = False
         self._spinner_task = None
         self._turn_start_time = None 
+        self.pasted_images = []
         
         self.model_name = "Mistral" 
         
@@ -142,23 +334,23 @@ class ChatUI:
         self._selection_instruction = ""
         self._ctrl_c_armed_until = 0.0
         self._auto_scroll = True
+        self.tool_approval_mode = "ask"  # Options: "ask", "auto"
+        self.plan_mode = False
 
         self.transcript = TextArea(
             text="",
             read_only=True,
-            focusable=False,
-            focus_on_click=False,  
+            focusable=True,
+            focus_on_click=True,  
             scrollbar=True,
             wrap_lines=True,
             style="class:transcript",
-            input_processors=[TranscriptProcessor()],
+            input_processors=[TranscriptProcessor(self)],
         )
-        
-        self._transcript_mouse_handler = self.transcript.control.mouse_handler
-        self.transcript.control.mouse_handler = self._handle_transcript_mouse_event
+        self.transcript.window.always_hide_cursor = lambda: True
         
         self.input = TextArea(
-            prompt=[("fg:#ffaa00 bold", "> ")],
+            prompt=self._get_prompt_text,
             multiline=True, 
             height=lambda: min(6, self.input.document.line_count),       
             wrap_lines=True,
@@ -171,9 +363,9 @@ class ChatUI:
         body = HSplit(
             [
                 self.transcript,
-                Window(height=1, char="─", style="fg:#444444"), 
+                Window(height=1, char="─", style="fg:#262626"), 
                 self.input,                                     
-                Window(height=1, char="─", style="fg:#444444"), 
+                Window(height=1, char="─", style="fg:#262626"), 
                 Window(height=1, content=FormattedTextControl(self._get_status_bar_text)), 
             ]
         )
@@ -206,6 +398,20 @@ class ChatUI:
     def _build_key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
 
+        @bindings.add("enter", filter=has_focus(self.transcript))
+        def _(event):
+            buffer = self.transcript.buffer
+            if buffer.selection_state:
+                try:
+                    data = buffer.copy_selection()
+                    event.app.clipboard.set_data(data)
+                    self.set_status("Copied to clipboard!")
+                except Exception as e:
+                    self.set_status(f"Copy failed: {e}", show_spinner=False)
+                buffer.exit_selection()
+            self.app.layout.focus(self.input)
+            self.app.invalidate()
+
         @bindings.add("enter")
         def _(event):
             self._auto_scroll = True 
@@ -231,6 +437,14 @@ class ChatUI:
             self._pending_input.set_result(text)
             buffer.set_document(Document("", 0), bypass_readonly=True)
 
+        @bindings.add(Keys.Any, filter=has_focus(self.transcript))
+        def _(event):
+            # Intercept regular typed characters and direct them to input
+            if event.data and not event.data.startswith('\x1b') and ord(event.data) >= 32:
+                self.transcript.buffer.exit_selection()
+                self.app.layout.focus(self.input)
+                self.input.buffer.insert_text(event.data)
+
         @bindings.add("tab")
         def _(event):
             if self.app.layout.has_focus(self.input):
@@ -239,6 +453,29 @@ class ChatUI:
             else:
                 self.app.layout.focus(self.input)
                 self.set_status("")
+
+        @bindings.add("s-tab")
+        def _(event):
+            self.plan_mode = not self.plan_mode
+            status = "ON" if self.plan_mode else "OFF"
+            self.set_status(f"Plan Mode: {status} (Shift+Tab to toggle)", show_spinner=False)
+            self.app.invalidate()
+
+        @bindings.add("c-t")
+        def _(event):
+            if self.tool_approval_mode == "ask":
+                self.tool_approval_mode = "auto"
+                self.set_status("Tool approval: Auto-Approve (Ctrl+T to toggle)", show_spinner=False)
+            else:
+                self.tool_approval_mode = "ask"
+                self.set_status("Tool approval: Ask (Ctrl+T to toggle)", show_spinner=False)
+            self.app.invalidate()
+
+        @bindings.add("c-g")
+        def _(event):
+            """Open external editor for long prompts."""
+            if self.app.layout.has_focus(self.input):
+                event.app.run_in_terminal(event.app.current_buffer.open_in_editor)
 
         @bindings.add("/")
         def _(event):
@@ -319,11 +556,13 @@ class ChatUI:
                     event.app.clipboard.set_data(data)
                     self.set_status("Copied to clipboard!")
                     buffer.exit_selection()
+                    self.app.layout.focus(self.input)
                     self.app.invalidate()
                 except Exception as e:
                     # Safely shows text without triggering an unwanted spinner
                     self.set_status(f"Copy failed: {e}", show_spinner=False)
                     buffer.exit_selection()
+                    self.app.layout.focus(self.input)
                 return
 
             # 2. If no text is highlighted, double-press to exit
@@ -333,19 +572,42 @@ class ChatUI:
                     self._pending_input.set_exception(EOFError())
                 return
             self._ctrl_c_armed_until = now + 2.5
-            self._status = [("fg:#aaaaaa", "Press Ctrl-C again to exit")]
+            self._status = [("fg:" + self._get_theme_color() + " bold", "  ⚠  Press Ctrl-C again to exit")]
             self.app.invalidate()
 
         @bindings.add("c-v")
         def _(event):
-            """Handle pasting text into the input field."""
+            """Handle pasting text or images into the input field."""
             if not self.app.layout.has_focus(self.input):
                 self.app.layout.focus(self.input)
+            
+            try:
+                from PIL import ImageGrab, Image
+                import datetime
+                img = ImageGrab.grabclipboard()
+                if isinstance(img, Image.Image):
+                    from chatbot_cli.app_config import USER_DATA_DIR
+                    images_dir = USER_DATA_DIR / "images"
+                    images_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"copied_image_{timestamp}.png"
+                    filepath = images_dir / filename
+                    img.save(filepath, "PNG")
+                    
+                    self.pasted_images.append(str(filepath))
+                    self.input.buffer.insert_text(f" [Image Pasted: {filename}] ")
+                    self.set_status(f"Image pasted and saved to {filename}")
+                    self.app.invalidate()
+                    return
+            except Exception:
+                pass
+
             data = event.app.clipboard.get_data()
             if data.text:
                 self.input.buffer.insert_text(data.text)
 
-        @bindings.add("c-t")
+        @bindings.add("c-o")
         def _(event):
             if not self._tool_blocks:
                 return
@@ -355,7 +617,7 @@ class ChatUI:
                 self.set_status("Tool output collapsed.")
             else:
                 self._tool_expanded.add(last_idx)
-                self.set_status("Tool output expanded. Ctrl+T to collapse.")
+                self.set_status("Tool output expanded. Ctrl+O to collapse.")
             self._rebuild_transcript()
 
         @bindings.add("c-q")
@@ -366,26 +628,88 @@ class ChatUI:
 
         return bindings
 
+    def _get_theme_color(self) -> str:
+        name = str(self.model_name).lower()
+        if "openai" in name:
+            return "#10b981"  # Emerald/Green
+        elif "google" in name or "gemini" in name:
+            return "#8b5cf6"  # Violet/Purple
+        elif "anthropic" in name or "claude" in name:
+            return "#f97316"  # Orange
+        elif "ollama" in name or "llama" in name:
+            return "#a855f7"  # Purple
+        elif "mistral" in name:
+            return "#ff8c00"  # Mistral dark orange
+        else:
+            return "#ffaa00"  # Default gold/orange
+
+    def _get_prompt_text(self):
+        theme_color = self._get_theme_color()
+        return [("fg:" + theme_color + " bold", "❯ ")]
+
     def _get_status_bar_text(self):
         if isinstance(self._status, list):
             return self._status
         
+        try:
+            columns = self.app.output.get_size().columns
+        except Exception:
+            columns = 80
+
         spinner = ["|", "/", "-", "\\"][self._spinner_index % 4] if self._spinner_active else ""
+        theme_color = self._get_theme_color()
         
-        # Fallback to "AI Model" if it evaluates to None or empty
-        display_model = self.model_name if (self.model_name and str(self.model_name).lower() != "none") else "AI Model"
-        
-        base_footer = [
-            ("fg:#ffaa00 bold", f" {spinner} ▶▶ " if spinner else " ▶▶ "),
-            ("fg:#888888", f"{display_model} | ")
-        ]
-        
+        left_parts = []
         if self._spinner_active or self._status_display:
-            base_footer.append(("fg:#ffaa00", self._status_display))
+            if spinner:
+                left_parts.append(("fg:" + theme_color + " bold", f"  {spinner}  "))
+            else:
+                left_parts.append(("fg:" + theme_color + " bold", "  ●  "))
+            left_parts.append(("fg:" + theme_color, self._status_display))
         else:
-            base_footer.append(("fg:#888888", "Ctrl+T: Toggle | Ctrl+C x2: Exit"))
-            
-        return base_footer
+            left_parts = [
+                ("fg:#666666", "  "),
+                ("fg:#888888 bold", "Ctrl+O"),
+                ("fg:#555555", " Toggle Details  │  "),
+                ("fg:#888888 bold", "Ctrl+Space"),
+                ("fg:#555555", " Copy Mode  │  "),
+                ("fg:#888888 bold", "Tab"),
+                ("fg:#555555", " Switch Focus"),
+            ]
+
+        provider_map = {
+            "openai": "OpenAI",
+            "google": "Google Gemini",
+            "anthropic": "Anthropic Claude",
+            "ollama": "Ollama (Local)",
+            "mistral": "Mistral AI"
+        }
+        raw_name = str(self.model_name).lower()
+        display_model = provider_map.get(raw_name, self.model_name)
+
+        mode_text = "Ask" if self.tool_approval_mode == "ask" else "Auto"
+        mode_color = "#ffaa00" if self.tool_approval_mode == "ask" else "#10b981"
+        plan_text = "ON" if self.plan_mode else "OFF"
+        plan_color = "#00ffff" if self.plan_mode else "#666666"
+
+        right_parts = [
+            ("fg:#888888 bold", "Ctrl+T "),
+            ("fg:" + mode_color, mode_text),
+            ("fg:#555555", "  │  "),
+            ("fg:#888888 bold", "Shift+Tab Plan "),
+            ("fg:" + plan_color, plan_text),
+            ("fg:#555555", "  │  "),
+            ("fg:" + theme_color + " bold", display_model),
+            ("fg:#666666", "  ")
+        ]
+
+        left_len = sum(len(text) for _, text in left_parts)
+        right_len = sum(len(text) for _, text in right_parts)
+
+        spaces_count = max(1, columns - left_len - right_len)
+        spaces = " " * spaces_count
+
+        return left_parts + [("", spaces)] + right_parts
 
     def _page_scroll_count(self) -> int:
         info = self.transcript.window.render_info
@@ -410,25 +734,14 @@ class ChatUI:
 
         self.app.invalidate()
 
-    def _handle_transcript_mouse_event(self, mouse_event):
-        if mouse_event.event_type == MouseEventType.SCROLL_UP:
-            self._scroll_transcript(-3)
-            return None
-        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
-            self._scroll_transcript(3)
-            return None
-        result = self._transcript_mouse_handler(mouse_event)
-        if mouse_event.event_type == MouseEventType.MOUSE_UP:
-            self.app.layout.focus(self.input)
-        return result
-
     def _selection_block(self) -> str:
         if not self._selection_options:
             return ""
         lines = [self._selection_title]
         for index, option in enumerate(self._selection_options):
             prefix = ">" if index == self._selection_index else " "
-            lines.append(f"{prefix} {index + 1}. {option['label']}  [{option['thread_id'][:8]}]")
+            suffix = f"  [{option['thread_id'][:8]}]" if 'thread_id' in option else ""
+            lines.append(f"{prefix} {index + 1}. {option['label']}{suffix}")
         if self._selection_instruction:
             lines.append(self._selection_instruction)
         return "\n".join(lines)
@@ -466,6 +779,10 @@ class ChatUI:
                 idx = chunk['idx']
                 tb = self._tool_blocks[idx]
                 text += self._tool_block_text(idx, tb['name'], tb['output'], tb['in_flight'])
+            elif chunk['type'] == 'thought':
+                idx = chunk['idx']
+                tb = self._thought_blocks[idx]
+                text += self._thought_block_text(idx, tb['elapsed'], tb['tokens'], tb['content'], tb['in_flight'])
             elif chunk['type'] == 'bot':
                 text += chunk['text'] + "\n"
             elif chunk['type'] == 'time':
@@ -482,11 +799,11 @@ class ChatUI:
         self._chunks.clear()
         self._tool_blocks.clear()
         self._tool_expanded.clear()
+        self._thought_blocks.clear()
         self._auto_scroll = True
         self._rebuild_transcript()
 
     def start_bot_message(self):
-        # NOTE: self._turn_start_time is removed from here so it doesn't overwrite the turn clock!
         self._spinner_active = True
         if self._spinner_task is None or self._spinner_task.done():
             self._spinner_task = asyncio.create_task(self._run_spinner())
@@ -528,32 +845,81 @@ class ChatUI:
         lines = full_output.rstrip().splitlines()
         first_line = lines[0] if lines else tool_name
         
-        header = f"\u200b┌ 🔧 {first_line}"
+        friendly = get_friendly_tool_name(tool_name)
+        if friendly != tool_name:
+            if first_line.startswith(tool_name + "("):
+                first_line = friendly + first_line[len(tool_name):]
+            elif first_line.startswith(tool_name + " "):
+                first_line = friendly + first_line[len(tool_name):]
+            elif first_line == tool_name:
+                first_line = friendly
+        
+        header = f"{TOOL_HEADER_MARKER}● {first_line}"
         expanded = idx in self._tool_expanded
 
         def format_body(lines_list):
             if not lines_list:
-                return "\u200b  (No output)"
-            return "\n".join(f"\u200b  {l}" for l in lines_list)
+                return f"{TOOL_BODY_MARKER}  (No output)"
+            return "\n".join(f"{TOOL_BODY_MARKER}  {l}" for l in lines_list)
+
+        if in_flight:
+            braille_chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+            spinner_char = braille_chars[self._spinner_index % len(braille_chars)]
+            
+            header = f"{TOOL_HEADER_MARKER}● {first_line} (ctrl+o to expand)"
+            body = (
+                f"{TOOL_BODY_MARKER}{spinner_char} Generating...\n"
+                f"{TOOL_BODY_MARKER}└ Tip: Press ctrl+g to open an external editor for long prompts.\n"
+                f"{TOOL_BODY_MARKER}───────────────────────────────────────────────────────────────────"
+            )
+            return f"\n{header}\n{body}\n"
 
         if not in_flight and not expanded:
-            return f"\n{header}  [✓]\n\u200b└{'─' * 24}\n"
+            hint = f"{HINT_MARKER}  (ctrl+o to expand)"
+            return f"\n{header}\n{hint}\n"
             
         if not in_flight and expanded:
             body_lines = lines[1:] if len(lines) > 1 else []
             body = format_body(body_lines)
-            hint = "\u200b\\ Tool output expanded. Ctrl+T to collapse."
-            return f"\n{header}  [✓]\n{body}\n{hint}\n"
+            hint = f"{HINT_MARKER}  (ctrl+o to collapse)"
+            return f"\n{header}\n{body}\n{hint}\n"
 
-        if expanded:
-            body_lines = lines[1:] if len(lines) > 1 else []
-            body = format_body(body_lines) if body_lines else "\u200b  (Waiting for output...)"
-            hint = "\u200b\\ Tool output expanded. Ctrl+T to collapse."
-        else:
-            body = "\u200b  Running..."
-            hint = "\u200b\\ Press Ctrl+T to see whole output."
+        return f"\n{header}\n{hint}\n"
 
-        return f"\n{header}\n{body}\n{hint}\n"
+    def start_thought(self) -> int:
+        idx = len(self._thought_blocks)
+        self._thought_blocks.append({
+            'elapsed': 0.0,
+            'tokens': 0,
+            'content': "",
+            'in_flight': True,
+            'start_time': time.time()
+        })
+        self._chunks.append({'type': 'thought', 'idx': idx})
+        self._rebuild_transcript()
+        return idx
+
+    def update_thought(self, idx: int, content: str, tokens: int = None, in_flight: bool = True):
+        if 0 <= idx < len(self._thought_blocks):
+            tb = self._thought_blocks[idx]
+            tb['content'] = content
+            tb['in_flight'] = in_flight
+            tb['elapsed'] = time.time() - tb['start_time']
+            if tokens is not None:
+                tb['tokens'] = tokens
+            else:
+                tb['tokens'] = len(content.split())
+            self._rebuild_transcript()
+
+    def _thought_block_text(self, idx: int, elapsed: float, tokens: int, content: str, in_flight: bool) -> str:
+        header = f"{THOUGHT_HEADER_MARKER}▸ Thought for {elapsed:.1f}s, {tokens} tokens"
+        if not content.strip():
+            return f"\n{header}\n"
+        
+        lines = content.rstrip().splitlines()
+        body_lines = [f"{THOUGHT_BODY_MARKER}  {line}" for line in lines]
+        body = "\n".join(body_lines)
+        return f"\n{header}\n{body}\n"
 
     def has_selection(self) -> bool:
         return bool(self._selection_options)
@@ -650,3 +1016,56 @@ class ChatUI:
         except Exception as e:
             # This will now successfully catch background crashes!
             raise RuntimeError(f"ChatUI crashed unexpectedly: {e}") from e
+
+    def get_clean_transcript_text(self) -> str:
+        parts = []
+        for chunk in self._chunks:
+            if chunk['type'] == 'text':
+                text = chunk['text']
+                if text.startswith("> "):
+                    text = "You: " + text[2:]
+                parts.append((chunk['type'], text))
+            elif chunk['type'] == 'bot':
+                text = chunk['text']
+                if text.startswith("❯ "):
+                    text = "Saarthi: " + text[2:]
+                parts.append((chunk['type'], text))
+            elif chunk['type'] == 'time':
+                parts.append((chunk['type'], chunk['text']))
+            elif chunk['type'] == 'thought':
+                idx = chunk['idx']
+                tb = self._thought_blocks[idx]
+                elapsed = tb['elapsed']
+                tokens = tb['tokens']
+                content = tb['content']
+                thought_lines = [f"▸ Thought for {elapsed:.1f}s, {tokens} tokens"]
+                for l in content.rstrip().splitlines():
+                    thought_lines.append(f"  {l}")
+                parts.append((chunk['type'], "\n".join(thought_lines)))
+            elif chunk['type'] == 'tool':
+                idx = chunk['idx']
+                tb = self._tool_blocks[idx]
+                full_output = tb['output']
+                tool_name = tb['name']
+                tool_lines = full_output.rstrip().splitlines()
+                first_line = tool_lines[0] if tool_lines else tool_name
+                tool_block_lines = [f"● {first_line}"]
+                body_lines = tool_lines[1:] if len(tool_lines) > 1 else []
+                for l in body_lines:
+                    tool_block_lines.append(f"  {l}")
+                parts.append((chunk['type'], "\n".join(tool_block_lines)))
+
+        text_out = ""
+        for i, (ctype, ctext) in enumerate(parts):
+            if i > 0:
+                prev_type = parts[i-1][0]
+                if ctype in ('thought', 'tool') or prev_type in ('thought', 'tool', 'time'):
+                    text_out += "\n\n"
+                else:
+                    text_out += "\n"
+            text_out += ctext
+            
+        text_out = text_out.replace("\u200b", "")
+        for marker in ("\u2001", "\u2002", "\u2003", "\u2004", "\u2005"):
+            text_out = text_out.replace(marker, "")
+        return text_out
